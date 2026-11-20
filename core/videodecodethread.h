@@ -1,0 +1,142 @@
+/*
+解码视频
+同步音频时钟
+按原视频帧率显示
+传给 VideoWidget
+*/
+
+#ifndef VIDEODECODETHREAD_H
+#define VIDEODECODETHREAD_H
+
+#include "core/decodethread.h"
+#include <thread>
+#include <atomic>
+#include <functional>
+#include <mutex>
+class VideoWidget;
+class VideoRenderThread;
+class FrameConverter;
+class VideoDecodeThread : public DecodeThread
+{
+public:
+    //同步时间，由外部传入
+    void setSynpts(long long synpts);
+
+    explicit VideoDecodeThread(int frameSize = 100 , bool keep_last = true);
+    ~VideoDecodeThread();
+    //
+    bool open(AVStream* videoStream , PaintFrame cb);
+
+    //给seek做的函数，如果没到达指定pos就释放，到了就显示并释放
+    bool repaintPts(AVPacket *pkt, int64_t seekpts,int serial,int64_t& realPts);
+
+    //暂停（解码线程 + 渲染线程）
+    void setPause(bool isPause);
+    //只暂停渲染，解码继续
+    void setRenderPause(bool isPause);
+
+    //paint
+    void paint(AVFrame* frame);
+
+    void run();
+
+    //设置“还有视频未播放”
+    void setLastSome(bool lastSome);
+
+    /*
+     * 换台/关闭时清掉上一轮遗留的"尾帧/播完"标志。
+     * 必须在线程 join 之后调用（渲染线程在尾帧阶段会重新置位），
+     * 否则新文件会被当成"已播完"，立刻 seek(0.0)/切下一集。
+     */
+    void resetPlayState();
+
+    long long getVideoRenderPts();
+
+    //设置fps
+    void setFps(AVStream* videoStream);
+    //取fps
+    double getFps() const;
+
+    //有没有音频
+    void setHasAudio(bool flag);
+
+    // 完全停止并释放解码器
+    void close();
+
+    // 只停线程+清队列
+    void stopAndClear();
+
+    // 重启解码线程
+    void restart();
+
+    // 启动/等待解码线程（std::thread）
+    void start();
+    void wait();
+
+    /*
+     * 清 FrameQueue 前后用来"停稳消费者"的一对函数（成对使用）：
+     *   parkRenderer()   = 停渲染线程并 join（内部会 abort 帧队列），
+     *                      保证此后没有线程再持有队列里的裸 Frame*；
+     *   unparkRenderer() = 清掉 abort 标志，把渲染线程重新拉起来。
+     * 只 park 不 unpark 会一直没有画面。
+     */
+    void parkRenderer();
+    void unparkRenderer();
+
+    // ==================== 逐帧 ====================
+    // 请求逐帧：delta = +1 下一帧，-1 上一帧
+    void requestStep(int delta);
+    // 清掉所有还没执行的逐帧请求
+    void clearStepRequests();
+    // 当前显示帧是否就是队列里的最新帧（退出逐帧时判断能否无缝续播）
+    bool cursorAtNewest();
+
+    // ==================== 历史回填 ====================
+    // 逐帧回退到历史最旧帧时需要向后补一段：由 demux 线程调用
+
+    // 清掉待解码数据（保留历史帧）
+    void clearForRefill();
+    // 从当前(已 seek 到 boundary 之前)位置解码到 boundaryMs，收集更早的帧回填历史
+    // readPkt 由 demux 提供，返回视频包（内部释放非视频包），返回 nullptr 表示结束
+    bool refillBackward(int64_t boundaryMs, int serial,
+                        const std::function<AVPacket*()>& readPkt);
+    // 回填收尾
+    void finishRefill(bool gotFrames);
+
+    void setSerial(int serial);
+
+    bool getPlayDone();
+
+    void setSpeed(double speed);
+
+    //历史耗尽，需要 demux 线程向后 seek 回填
+    std::atomic<bool> needRefill{false};
+    //回填的上界（历史最旧帧的 pts，毫秒）
+    std::atomic<long long> refillBoundaryPts{-1};
+
+private:
+    // 解码线程：run() 的 std::thread 版本（渲染线程由 VideoRenderThread 自己持有）
+    std::thread m_decodeThread;
+    // 线程是否在跑（start() 幂等用，避免重复 start 时自己 join 自己）
+    std::atomic<bool> m_running{false};
+    std::atomic<bool> m_isPause = false;
+
+    PaintFrame m_painter = nullptr;
+
+    //视频渲染线程  framequeue消费者
+    VideoRenderThread *m_videoRenderThread = nullptr;
+    AVStream* m_videoStream = nullptr;
+    std::mutex m_viMutex;
+
+    //逐帧回填时独占解码循环，避免和解码线程交叉 send/recv
+    std::mutex m_decodeGate;
+    std::atomic<bool> m_stepDecoding{false};
+    //回填期间会临时把 skip_frame 调成完整解码，这里保存原值用于恢复
+    int m_originalSkip = 0;
+
+    //像素格式转换
+    FrameConverter* m_converter = nullptr;
+
+};
+
+#endif // VIDEODECODETHREAD_H

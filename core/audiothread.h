@@ -1,0 +1,144 @@
+#ifndef AUDIOTHREAD_H
+#define AUDIOTHREAD_H
+
+#include "core/decodethread.h"
+#include "core/iaudiooutput.h"
+#include <thread>
+#include <atomic>
+#include <mutex>
+
+class SwrContext;
+struct AVFilterGraph;
+struct AVFilterContext;
+class AudioThread :public DecodeThread
+{
+public:
+    explicit AudioThread(int frameQueSizeize = 100 , bool keep_last = false);
+    ~AudioThread();
+
+    // 初始化音频
+    bool open(AVStream *audioStream , IAudioOutput* out);
+
+    // 关闭
+    void close();
+
+    // 清空
+    void clear();
+
+    // 暂停
+    void setPause(bool isPause);
+
+    // 启动音频线程
+    void startAudio();
+
+    void sendPts(int64_t ptsMs);
+
+    // 获取当前音频时钟
+    long long getPts();
+
+    void setSerial(int serial);
+
+
+    // 倍速：只设置目标速度，实际重建在解码线程做（无锁）
+    void setSpeed(double speed);          // 外部（GUI）调用，仅写原子变量
+    double getSpeed() const { return m_desiredSpeed.load(); }
+
+    // 请求在解码线程里重置 swr 和 atempo（seek 后调用，线程安全）
+    void requestFilterReset() { m_needFilterReset.store(true); }
+
+    bool isPlayFinished();
+
+private:
+
+    // 解码线程
+    void decodeRun();
+
+    // 播放线程
+    void playRun();
+
+    // 重采样初始化
+    bool resampleInit();
+
+
+    //倍速滤镜
+    // 创建 atempo 滤镜图
+    bool initAtempoFilter(double speed);
+    // 释放滤镜图
+    void freeAtempoFilter();
+    // 滤镜图是否可用：initAtempoFilter() 失败时三者会留空，此时只能走原速直通
+    bool atempoReady() const { return m_filterGraph && m_buffersrcCtx && m_buffersinkCtx; }
+
+private:
+
+    // 音频播放器
+    IAudioOutput* m_out = nullptr;
+    std::atomic<bool> m_outIsNullAudioPlayer{false};
+
+    // 重采样上下文
+    SwrContext *m_swr_ctx = nullptr;
+
+    // 重采样锁
+    std::mutex m_auMutex;
+
+    // 暂停
+    std::atomic<bool> m_isPause = false;
+
+    // 解码线程
+    std::thread m_decodeThread;
+
+    // 播放线程
+    std::thread m_playThread;
+
+    // 是否运行
+    std::atomic<bool> m_running = false;
+
+    // 当前音频时钟
+    std::atomic<long long> m_audioPts = 0;
+
+    // 输出采样率
+    int m_outSampleRate = 48000;
+
+    // 输出声道数
+    int m_outChannels = 2;
+
+    // 输出格式
+    AVSampleFormat m_outSampleFmt = AV_SAMPLE_FMT_S16;
+
+    AVStream *m_audioStream = nullptr;
+
+    // 倍速成员
+    // 目标速度
+    std::atomic<double> m_desiredSpeed{1.0};
+    // 滤镜当前速度（解码线程读写）
+    std::atomic<double> m_currentSpeed{1.0};
+
+    // 滤镜图
+    AVFilterGraph   *m_filterGraph   = nullptr;
+    // 源滤镜（喂数据）
+    AVFilterContext  *m_buffersrcCtx  = nullptr;
+    // atempo 滤镜
+    AVFilterContext  *m_tempoCtx      = nullptr;
+    // 汇滤镜（取数据）
+    AVFilterContext  *m_buffersinkCtx = nullptr;
+
+    std::atomic<bool> m_needFilterReset{false};
+    // 本次滤镜生命周期内，累计取出的输出样本数
+    int64_t m_outSamplesTotal = 0;
+    // 内容轴基准（重建滤镜时 = 当前音频内容时钟）
+    int64_t m_ptsBase = 0;
+    // 基准是否已用第一帧输入锚定
+    bool    m_ptsAnchorReady = false;
+};
+
+class NullAudioPlayer : public IAudioOutput {   // 无设备 / CI / 单元测试用
+public:
+    bool open(int, int) override { return true; }
+    void close() override {}
+    void clear() override {}
+    int  write(const uint8_t*, int bytes) override { return bytes; }   // 假装都写进去了
+    int  getFree() override { return 1 << 20; }
+    long long getNoPlayMs() override { return 0; }                      // 时钟 = 帧 PTS，一路快进
+    void setPause(bool) override {}
+};
+
+#endif
