@@ -121,6 +121,61 @@ static void on_event_cb(void *user, const op_event *ev)
     static_cast<Capture *>(user)->push(ev);
 }
 
+/* ---------------------------------------------------------------- 日志捕获 */
+
+/*
+ * 和事件一样：日志回调发生在 SDK 自己的线程上，捕获侧必须自己加锁。
+ * 顺便记下线程 id —— 日志的线程契约是"打日志的那个线程"，不是消息循环线程。
+ */
+struct LogCapture
+{
+    struct Line
+    {
+        int         level = 0;
+        std::string text;
+    };
+
+    std::mutex                    m;
+    std::condition_variable       cv;
+    std::vector<Line>             lines;
+    std::vector<std::thread::id>  threads;
+
+    void push(int level, const char *text)
+    {
+        std::lock_guard<std::mutex> lock(m);
+        lines.push_back(Line{level, text ? text : ""});
+        threads.push_back(std::this_thread::get_id());
+        cv.notify_all();
+    }
+
+    bool waitForContains(const std::string &needle, int timeoutMs)
+    {
+        std::unique_lock<std::mutex> lock(m);
+        return cv.wait_for(lock, std::chrono::milliseconds(timeoutMs), [&] {
+            for (const Line &l : lines)
+                if (l.text.find(needle) != std::string::npos) return true;
+            return false;
+        });
+    }
+
+    size_t count()
+    {
+        std::lock_guard<std::mutex> lock(m);
+        return lines.size();
+    }
+
+    std::thread::id lastThread()
+    {
+        std::lock_guard<std::mutex> lock(m);
+        return threads.empty() ? std::thread::id() : threads.back();
+    }
+};
+
+static void on_log_cb(void *user, int level, const char *line)
+{
+    static_cast<LogCapture *>(user)->push(level, line);
+}
+
 /* 视频帧回调：本用例不播真文件，只是让"注册过回调"这件事成立 */
 static void dummy_video(void *user, const op_frame *f)
 {
@@ -230,9 +285,34 @@ int main()
         CHECK(op_set_audio_format(p, 48000, 0) == OP_ERR_INVALID_ARG);
     }
 
-    std::printf("== 8. destroy：必须 join 干净，可重复 create/destroy\n");
+    std::printf("== 8. 日志回调（T1+）：core 的日志能到 UI 层\n");
+    LogCapture logs;
+    {
+        CHECK(op_set_log_cb(p, on_log_cb, &logs) == OP_OK);
+
+        // 用同一个"打不开的文件"再触发一次：core 会在 openFile 里
+        // logDebug() << "open" << url << "failed!:" << err_buf;
+        op_open_options opt{};
+        opt.fd   = -1;
+        opt.path = "definitely_missing_file_12345.mp4";
+        CHECK(op_open(p, &opt) == OP_OK);
+
+        CHECK(logs.waitForContains("failed", 3000));
+        CHECK(logs.count() > 0);
+
+        // 契约：日志回调在"打日志的那个 SDK 线程"上，不是调用方 UI 线程
+        CHECK(logs.lastThread() != mainThread);
+    }
+
+    std::printf("== 9. destroy：必须 join 干净，可重复 create/destroy\n");
+    const size_t logCountBeforeDestroy = logs.count();
     op_destroy(p);
     op_destroy(nullptr);   // 空指针必须容错
+
+    // 先摘日志回调、再 join 的效果：销毁之后不能再有任何日志回调打进来
+    // （user 指针此时已经无效，晚到一行就是 use-after-free）
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    CHECK(logs.count() == logCountBeforeDestroy);
 
     // 连跑两轮：漏线程 / 漏 join 的话，进程退出时会 terminate 或卡死
     for (int i = 0; i < 2; ++i) {

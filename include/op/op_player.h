@@ -1,4 +1,4 @@
-﻿/*
+/*
  * ============================================================================
  *  op_player.h —— 播放内核的 C 接口（唯一对外面）
  * ============================================================================
@@ -6,13 +6,14 @@
  *  这份头文件放这里是给新仓库（SDK）当起点的：QtPlayer 自己**不编译、不链接**它。
  *
  *  【实现状态 · 2026-11-21】**T1 + T2 已实现；T3 已连通待真文件验收；T4/T5 还是桩**。
- *  已能用：create / destroy / version / 回调注册 / open / play / pause / stop /
- *  seek / step / speed，以及 EVT_* → op_event 的映射与状态缓存
+ *  已能用：create / destroy / version / 回调注册（事件 / 视频帧 / 日志）/ open /
+ *  play / pause / stop / seek / step / speed，以及 EVT_* → op_event 的映射与状态缓存
  *  （op_state_of / position_ms / duration_ms / has_video / has_audio / is_music / is_stream）。
  *  仍是桩：音频 pull（T4）、fd 打开（T5）—— 返回 OP_ERR_UNSUPPORTED 并打一行日志，
  *  不会静默成功。下面每段的标题标了它属于哪个任务、现在是什么状态：
  *
  *      T1 骨架        create / destroy / version / 回调 / 播放控制    已实现
+ *      T1+ 日志       op_set_log_cb ← core::setLogSink（进程级广播）  已实现
  *      T2 事件        EVT_* → op_event + 状态缓存 + 查询              已实现
  *      T3 视频帧      op_video_cb + op_frame（紧凑缓冲视图）           已连通
  *      T4 音频 pull   op_audio_read / pending / latency_ms            桩
@@ -174,7 +175,21 @@ typedef void (*op_event_cb)(void *user, const op_event *ev);
 /* 视频帧回调：在 SDK 的解码/渲染线程上触发，每帧一次。同样禁止阻塞。 */
 typedef void (*op_video_cb)(void *user, const op_frame *frame);
 
-/* 日志回调：level 0=debug 1=info 2=warn 3=error；line 只在回调期间有效。 */
+/*
+ * 日志回调：level 0=debug 1=info 2=warn 3=error；line 是**一整行、不带换行**的
+ * UTF-8 文本，只在回调期间有效（要留就当场拷走）。
+ *
+ * 线程：在**打日志的那个 SDK 线程**上触发 —— 可能是解封装、视频解码、渲染、
+ * 音频或消息循环线程中的任意一个，**不保证**是消息循环线程。壳要更新 UI 就自己
+ * 排队（鸿蒙走 napi_threadsafe_function，Qt 走 QueuedConnection）。
+ *
+ * 规则（和事件回调一样）：回调里禁止阻塞、禁止做重活（写文件 / 加锁 / 跨进程通信）；
+ * 禁止在回调里调 op_destroy / op_stop（那是自己等自己，会死锁）。
+ *
+ * 归属：日志出口在 core 里是**进程级**的，SDK 不知道某一行属于哪个 op_player
+ * （core 的线程拿不到 player 指针）。所以多实例时，注册在 A 上的回调也会收到 B 的
+ * 日志 —— 单播放器场景完全精确，多播放器时请自己按内容区分或只在一个实例上注册。
+ */
 typedef void (*op_log_cb)(void *user, int level, const char *line);
 
 /* --------------------------------------------------------------- 句柄 */

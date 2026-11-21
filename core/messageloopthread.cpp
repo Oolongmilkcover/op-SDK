@@ -87,7 +87,9 @@ void MessageLoopThread::loop()
         logDebug()<<"m_queue is NULL";
         return;
     }
-    printf("[MessageLoop] Thread started.\n");
+    // 原来是 printf：既绕过了日志系统（op_log_cb 收不到），又和 logDebug 的输出
+    // 抢同一个终端。统一走 logDebug，启动/退出也能在 UI 的日志面板里看到。
+    logDebug() << "[MessageLoop] Thread started";
 
     while (m_running.load()) {
         PlayerMessage msg;
@@ -109,5 +111,5 @@ void MessageLoopThread::loop()
         }
     }
 
-    printf("[MessageLoop] Thread ended.\n");
+    logDebug() << "[MessageLoop] Thread ended";
 }

@@ -15,6 +15,7 @@
  * 当前状态（2026-11-21）：
  *   T1   create / destroy / version / 回调注册 / open / play / pause / stop /
  *        seek / step / speed        —— 已实现
+ *   T1+  日志：core::setLogSink → op_log_cb（进程级广播，方案 A） —— 已实现
  *   T2   EVT_* → op_event + 状态缓存 + 查询接口 —— 已实现
  *   T3   视频帧（videoCB）            —— 已连通，等真机/真文件验收
  *   T4   音频 pull（环形缓冲）        —— 仍是桩
@@ -23,10 +24,14 @@
 
 #include "op/op_player.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cstdlib>
+#include <mutex>
 #include <new>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include "core/log.h"
 #include "core/messagequeue.h"
@@ -44,7 +49,7 @@ namespace
 /*
  * 门面私有消息 id：把"在消息循环线程上发一个事件"变成一条消息。
  *
- * 为什么需要它：STATE 这种事件内核里没有数据源（EVT_STATE_CHANGED 从没人发过），
+ * 为什么需要它：STATE 这种事件内核里没有数据源（事件枚举里根本没有"状态变化"这一项），
  * 只能由门面合成；但按契约，事件必须在**消息循环线程**上触发，而调用 op_play()
  * 的往往是壳的 UI 线程。core 的 PlayerCore 对未识别的 what 会原样转回事件回调
  * （见 playercore.cpp 的 default 分支），于是这里投一条私有 id 的消息过去，
@@ -172,12 +177,86 @@ struct op_player
     void       *eventUser = nullptr;
     op_video_cb videoCb   = nullptr;
     void       *videoUser = nullptr;
+
+    /*
+     * 日志回调。**由 logHub().m 保护**，不单独加锁：core 的日志是进程级的
+     * （see coreLogSink），读写这对字段和遍历 player 表必须在同一把锁下，
+     * 否则会读到"cb 是新注册的、user 还是上一次的"这种拼不拢的组合。
+     */
     op_log_cb   logCb     = nullptr;
     void       *logUser   = nullptr;
 };
 
 namespace
 {
+
+/* ---------------------------------------------------------------------------
+ * 进程级日志广播（T1+）
+ *
+ * core 的日志出口在 core/log.h，而 log.h 里的日志是从 demux / 解码 / 渲染 /
+ * 音频 / 消息循环这些线程里发出来的 —— 那些线程只知道自己有个 MessageQueue，
+ * 根本不知道"我在为哪个 op_player 干活"。所以按方案 A：
+ *   core 装一个进程级 sink，门面维护"活着的 player"表，收到一条日志就广播给
+ *   每个注册了 logCb 的 player。
+ *
+ * 代价（要在头文件里如实写）：注册在 A 上的回调也可能收到 B 的日志。
+ * 单播放器时完全精确；多播放器时日志会重复上报。要精确归属得把 sink 指针
+ * 传进每个线程类（像 IAudioOutput 那样），为日志不值得。
+ * ------------------------------------------------------------------------- */
+struct LogHub
+{
+    std::mutex              m;
+    std::vector<op_player *> players;
+};
+
+LogHub &logHub()
+{
+    static LogHub hub;
+    return hub;
+}
+
+/* core 的日志出口。跑在"打日志的那个线程"上，不是消息循环线程。 */
+void coreLogSink(core::Level level, const char *line)
+{
+    /*
+     * 锁内只拷"回调 + user"，锁外再调：
+     *   用户完全可能在日志回调里调 op_seek / op_pause，而那些路径还会打日志、
+     *   还要拿这把锁 —— 拿着锁去回调就是自己等自己。
+     *   另外 erase(player) 与 delete(player) 也走这把锁，所以拷完就不能再碰 p。
+     */
+    std::vector<std::pair<op_log_cb, void *>> targets;
+    {
+        std::lock_guard<std::mutex> lock(logHub().m);
+        for (op_player *p : logHub().players) {
+            if (p->logCb)
+                targets.emplace_back(p->logCb, p->logUser);
+        }
+    }
+
+    for (const auto &t : targets)
+        t.first(t.second, static_cast<int>(level), line);
+}
+
+/*
+ * 按"有没有人注册日志回调"决定装不装 core 的 sink。
+ *
+ * 为什么要这么做：sink 一旦装上，log.h 就不再写 stderr 了。如果 SDK 只是被创建、
+ * 调用方没注册 op_log_cb，日志就彻底消失 —— 调试时会以为"内核不打日志了"。
+ * 所以默认保持原样（stderr），只有真有人要收的时候才接管。
+ *
+ * 调用方必须**已持有 logHub().m**：把"改表"和"决定装不装"放进同一个临界区，
+ * 否则两个线程一增一删，最后可能装成空 sink 或该装却没装。
+ * 锁顺序是 hub.m → logMutex，反方向不存在（log.h 只拿 logMutex 拷贝 sink，
+ * 放开之后才调 sink，而 sink 才去拿 hub.m）。
+ */
+void refreshSinkLocked()
+{
+    bool need = false;
+    for (op_player *p : logHub().players) {
+        if (p->logCb) { need = true; break; }
+    }
+    core::setLogSink(need ? core::LogSink(coreLogSink) : core::LogSink{});
+}
 
 /* 把一条事件交给用户回调。只允许在消息循环线程上调用。 */
 void deliver(op_player *p, op_event &ev)
@@ -333,9 +412,10 @@ void onCoreMessage(op_player *p, PlayerMessage &msg)
 
     default:
         /*
-         * EVT_STATE_CHANGED（内核从没发过）、EVT_DISABLEBTN / EVT_CLEARSCREEN /
-         * EVT_PLAYNEXT（上游 UI 专用）—— 全部丢掉：状态由门面合成，
-         * 那几个按钮/清屏动作该由壳自己按事件语义决定。
+         * EVT_DISABLEBTN / EVT_CLEARSCREEN / EVT_PLAYNEXT 是上游 Qt 播放器的 UI 动作
+         * （禁按钮 / 清屏 / 播下一集），SDK 里没有这些概念，一律丢掉。
+         * 状态事件不在这里：内核不发它（EVT_STATE_CHANGED 已从枚举里删掉），
+         * 由门面自己合成。
          */
         return;
     }
@@ -367,6 +447,16 @@ OP_API op_player *op_create(void)
     p->core.setEventCallBack([p](PlayerMessage &msg) { onCoreMessage(p, msg); });
     p->core.start();
 
+    /*
+     * 登记进广播表。sink 不在这里装 —— 等真有人 op_set_log_cb 了再装
+     * （见 refreshSinkLocked），没注册回调时日志继续写 stderr。
+     */
+    {
+        std::lock_guard<std::mutex> lock(logHub().m);
+        logHub().players.push_back(p);
+        refreshSinkLocked();   // 表变了，重算一次（不会装，因为这时还没有回调）
+    }
+
     return p;
 }
 
@@ -375,9 +465,22 @@ OP_API void op_destroy(op_player *p)
     if (!p) return;
 
     /*
-     * 显式 stop() 再 delete：stop() 会 join 消息循环（→ 此后不再有事件回调）以及
-     * demux / 解码 / 渲染 / 音频线程，返回后进程里没有线程还拿着 p。
-     * ~PlayerCore 里还会再调一次 stop()，那是幂等的（看 m_stopped）。
+     * ① **先摘日志回调，再停线程**。顺序反了的话，core 的线程在 stop() / join
+     *    期间还会打日志，而调用方这时很可能已经开始拆 UI（user 指针失效）。
+     *    摘掉之后那几行关机日志退回 stderr —— 用"退出安全"换"少几行日志"。
+     *    如果这是最后一个注册了回调的 player，refreshSinkLocked 会把 sink 也卸掉。
+     */
+    {
+        std::lock_guard<std::mutex> lock(logHub().m);
+        std::vector<op_player *> &v = logHub().players;
+        v.erase(std::remove(v.begin(), v.end(), p), v.end());
+        refreshSinkLocked();
+    }
+
+    /*
+     * ② 显式 stop() 再 delete：stop() 会 join 消息循环（→ 此后不再有事件回调）以及
+     *    demux / 解码 / 渲染 / 音频线程，返回后进程里没有线程还拿着 p。
+     *    ~PlayerCore 里还会再调一次 stop()，那是幂等的（看 m_stopped）。
      */
     p->core.stop();
     delete p;
@@ -418,10 +521,15 @@ OP_API op_result op_set_video_cb(op_player *p, op_video_cb cb, void *user)
 OP_API op_result op_set_log_cb(op_player *p, op_log_cb cb, void *user)
 {
     if (!p) return OP_ERR_INVALID_ARG;
+    /*
+     * 和 logHub().m 同一把锁：coreLogSink 遍历这张表时读的也是它，
+     * 保证"cb 和 user 一定是同一次注册里写进去的那一对"。
+     * cb == NULL 就是取消订阅（player 还留在表里，只是不再收日志）。
+     */
+    std::lock_guard<std::mutex> lock(logHub().m);
     p->logCb   = cb;
     p->logUser = user;
-    // TODO(T1+)：core/log.h 现在是直接写 stderr 的（没留 sink 钩子）。
-    // 要么给 core::LogLine 加一个可替换的 sink，要么这个接口就只保留字段。
+    refreshSinkLocked();   // 第一个注册的回调会在这里把 core 的 sink 装上
     return OP_OK;
 }
 
