@@ -123,8 +123,6 @@ void PlayerCore::setMessageHandler()
                 // arg1=时长ms, arg2=(宽<<16)|高
             case EVT_POSITION:
                 // arg1=当前播放位置ms（100~200ms 一次，别每帧发）
-            case EVT_STATE_CHANGED:
-                // arg1=新状态（IDLE/INITIALIZED/PREPARING/PREPARED/STARTED/PAUSED/COMPLETED/STOPPED/ERROR）
             case EVT_DISABLEBTN:
                 //关闭按钮
             case EVT_ABLEBTN:

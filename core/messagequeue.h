@@ -23,10 +23,18 @@ enum PlayerCmd {
 };
 
 //Core->UI
+/*
+ * EVT_STATE_CHANGED 已删除（2026-11-21）：内核从来没发过它。
+ * SDK 对外要报的 IDLE / OPENING / PLAYING / ... 由门面（op_player）自己合成并缓存，
+ * 内核不该再维护第二份"我现在是什么状态"—— 两份状态互相覆盖，正是上游那五个
+ * 状态 bug 的来源。
+ *
+ * 注意：删中间一条会让后面的值整体前移（隐式递增）。收发两端都按名字用，
+ * 值也不跨进程持久化，所以不影响；但别在别处存裸数字，否则以后再加删会静默错位。
+ */
 enum PlayerEvent {
     EVT_PREPARED     = 100,            // arg1=时长ms, arg2=(宽<<16)|高
     EVT_POSITION,                      // arg1=当前播放位置ms（100~200ms 一次，别每帧发）
-    EVT_STATE_CHANGED,                 // arg1=新状态（IDLE/INITIALIZED/PREPARING/PREPARED/STARTED/PAUSED/COMPLETED/STOPPED/ERROR）
     EVT_CLEARSCREEN,                   // 清屏
     EVT_DISABLEBTN,                    //关闭按钮
     EVT_ABLEBTN,                       //开启按钮
