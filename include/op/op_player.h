@@ -1,9 +1,22 @@
-/*
+﻿/*
  * ============================================================================
- *  op_player.h —— 播放内核的 C 接口（**草案 / 设计稿**，不是最终版）
+ *  op_player.h —— 播放内核的 C 接口（唯一对外面）
  * ============================================================================
  *
  *  这份头文件放这里是给新仓库（SDK）当起点的：QtPlayer 自己**不编译、不链接**它。
+ *
+ *  【实现状态 · 2026-11-21】**T1 + T2 已实现；T3 已连通待真文件验收；T4/T5 还是桩**。
+ *  已能用：create / destroy / version / 回调注册 / open / play / pause / stop /
+ *  seek / step / speed，以及 EVT_* → op_event 的映射与状态缓存
+ *  （op_state_of / position_ms / duration_ms / has_video / has_audio / is_music / is_stream）。
+ *  仍是桩：音频 pull（T4）、fd 打开（T5）—— 返回 OP_ERR_UNSUPPORTED 并打一行日志，
+ *  不会静默成功。下面每段的标题标了它属于哪个任务、现在是什么状态：
+ *
+ *      T1 骨架        create / destroy / version / 回调 / 播放控制    已实现
+ *      T2 事件        EVT_* → op_event + 状态缓存 + 查询              已实现
+ *      T3 视频帧      op_video_cb + op_frame（紧凑缓冲视图）           已连通
+ *      T4 音频 pull   op_audio_read / pending / latency_ms            桩
+ *      T5 fd 打开     op_open_options.fd（自定义 AVIO）                桩
  *
  *  为什么是 C 而不是 C++：
  *    鸿蒙只能经 NAPI 调 C 函数、安卓要走 JNI，C++ 对象（std::function / 虚表 /
@@ -20,10 +33,18 @@
  *    3. 视频帧是 **借用视图**（`op_frame`），不跨边界传 AVFrame*。
  *       AVFrame 里有引用计数、有 FFmpeg ABI，不该泄给调用方。
  *
- *  还没有定稿的地方（标了 TODO，需要真机验证后再收敛）：
- *    - 事件结构体是否需要"复合事件"（比如一次 OPENED 同时带时长和宽高已够用）；
- *    - 音量是否要走 0~100 整数（当前是），以及是否要单独的 `op_set_mute`；
+ *  **音量不归 SDK 管**（2026-11-21 定）：音频是 pull 模式，PCM 已经交到调用方手里，
+ *  音量由壳自己处理（对样本做缩放，或用平台播放器/系统音量）。所以这里没有
+ *  op_set_volume —— 为什么这么定，见"播放控制"那一段的注释。
+ *
+ *  还没定稿、要在真机上收敛的两处：
+ *    - 事件结构体是否需要"复合事件"（当前一次 OPENED 同时带时长和宽高，够用）；
  *    - 是否需要 `op_audio_read` 之外再提供"设备延迟"接口（当前给了 latency_ms）。
+ *
+ *  【编码】本文件是 UTF-8 **带 BOM**。注释里全是中文，而 MSVC 默认按系统代码页
+ *  （中文 Windows = 936/GBK）解析源文件：不带 BOM 又不加 /utf-8 时，每个消费方
+ *  都会吃到 C4819，运气不好还会把注释里的多字节序列解析成引号/花括号。
+ *  BOM 是唯一"不需要消费方配合开关"的解法 —— 别把它当垃圾删掉。
  */
 
 #ifndef OP_PLAYER_H
@@ -90,7 +111,7 @@ typedef enum op_event_type
     OP_EVENT_STATE      = 3,    /* state：状态机变化 */
     OP_EVENT_SEEK_DONE  = 4,    /* position_ms：实际落点（可能和请求值不同，要对齐关键帧） */
     OP_EVENT_BUFFERING  = 5,    /* has_video：1 开始缓冲 / 0 结束（网络流才有意义） */
-    OP_EVENT_COMPLETED  = 6,    /* 播到文件尾 */
+    OP_EVENT_COMPLETED  = 6,    /* 播到文件尾（内核随后会自动回 0 重播；想停在结尾就在这里的回调里调 op_pause） */
     OP_EVENT_ERROR      = 7     /* code + message */
 } op_event_type;
 
@@ -120,11 +141,26 @@ typedef struct op_event
  * 视频帧视图：**数据归 SDK 所有**，只在 `op_video_cb` 回调期间有效。
  * 调用方要么在回调里同步用完（比如直接 glTexSubImage2D 上传），
  * 要么自己 memcpy 走。回调返回后这块内存随时可能被复用。
+ *
+ * 所有权只说一遍：**调用方什么都不用释放，也不许释放**。
+ * 底下的 AVFrame 由 SDK 在回调返回后自己 av_frame_free（内核里 painter 接走帧的
+ * 所有权就是这个约定），所以既不要 free(data)，也不要把指针存起来之后再用。
  */
 typedef struct op_frame
 {
-    const uint8_t *data[3];     /* Y / U / V 平面 */
-    int32_t        linesize[3]; /* 每行字节数（可能 > 宽度，逐行上传时要用） */
+    /*
+     * 一块**紧凑连续的缓冲**：Y、U、V 依次排列，行与行之间没有对齐填充。
+     * 平面偏移（仅 format=0 / YUV420P 时成立）：
+     *     Y = data
+     *     U = data + linesize[0] * height
+     *     V = U    + linesize[1] * (height / 2)
+     * 想要"三平面各自起点"的用法，按上面三行算；这里不额外给指针数组，
+     * 是因为壳大多数时候一次上传整块（或按 offset 传 GPU）。
+     */
+    uint8_t       *data;
+    int32_t        size;        /* data 的字节数（= av_image_get_buffer_size(...,1)） */
+    int32_t        linesize[4]; /* 每平面**每行字节数，按上面这种紧凑布局算**（Y 一般是 width，
+                                   不是源 AVFrame 那个 16/32 字节对齐后的值） */
     int32_t        width;
     int32_t        height;
     int64_t        pts_ms;      /* 显示时间戳（毫秒） */
@@ -159,7 +195,7 @@ typedef struct op_open_options
 } op_open_options;
 
 /* ================================================================== */
-/*  生命周期                                                           */
+/*  生命周期                                    状态：已实现（T1 骨架）   */
 /*                                                                    */
 /*  线程约定（很重要）：                                                */
 /*   - op_create / op_destroy：在调用方的任意一个线程调用；op_destroy  */
@@ -181,14 +217,22 @@ OP_API op_result  op_set_video_cb(op_player *p, op_video_cb cb, void *user);
 OP_API op_result  op_set_log_cb  (op_player *p, op_log_cb   cb, void *user);
 
 /* ================================================================== */
-/*  打开 / 播放控制                                                     */
+/*  打开 / 播放控制                      状态：已实现（T1/T2；fd 待 T5）   */
 /* ================================================================== */
 
 /*
  * 异步打开：立刻返回 OP_OK 表示"已受理"，真正结果通过
  * OP_EVENT_OPENED 或 OP_EVENT_ERROR 通知。重复 open 会先关掉上一个。
+ *
+ * 实现提示（T1，别被"异步"骗了）：内核现在的 CMD_OPEN 是在 SDK 的消息循环线程里
+ * 同步做 avformat_open_input 的 —— 网络流建连那几秒里，整条消息循环（连同 seek /
+ * pause）都在排队。要做到"真的立刻返回"，得把 open 挪到工作线程去；
+ * 在此之前，OP_OK 准确的含义是"消息进队了"。
+ *
+ * 打开成功后内核会马上开始推进（解码/渲染/音频线程起来），想"停在第一帧等人按播放"，
+ * 要在 OPENED 回调里自己调 op_pause —— 目前没有"打开但不自启"的开关。
  */
-OP_API op_result op_open(op_player *p, const op_open_options *opt);
+OP_API op_result op_open(op_player *p, const op_open_options *opt );
 
 OP_API op_result op_play (op_player *p);
 OP_API op_result op_pause(op_player *p);
@@ -203,11 +247,20 @@ OP_API op_result op_exit_frame_step(op_player *p);
 /* 倍速，用 ×10 的整数避免 C 接口里出现 double：5~20 表示 0.5x ~ 2.0x。 */
 OP_API op_result op_set_speed(op_player *p, int32_t speed_x10);
 
-/* 音量 0~100（线性）；具体增益曲线由各平台后端决定。 */
-OP_API op_result op_set_volume(op_player *p, int32_t volume);
+/*
+ * 音量：**故意没有这个接口**（2026-11-21 定，交给壳）。
+ *
+ * 音频是 pull 的，PCM 已经读走了。SDK 内部再存一份音量，就会和平台设备自己的音量
+ * 叠乘（系统音量 20% × SDK 的 50% = 实际 10%），用户看到的是"调了没反应"或者
+ * "怎么突然这么小声"，而且调音量的曲线该由壳决定，SDK 猜不准。
+ *
+ * 壳侧要做的事：对 op_audio_read 拿到的 S16 交错样本做一次缩放即可；
+ * 如果直接用平台播放器（QAudioSink / AudioRenderer / AudioTrack）的音量接口，
+ * 连缩放都不用。
+ */
 
 /* ================================================================== */
-/*  音频：**拉模式**                                                    */
+/*  音频：**拉模式**                               状态：桩（未实现，T4）   */
 /*                                                                    */
 /*  调用方在自己的音频线程里循环 op_audio_read()，把拿到的 PCM 写进     */
 /*  平台的 AudioRenderer / AudioTrack。返回 0 表示暂时没数据（别忙转，   */
@@ -217,6 +270,11 @@ OP_API op_result op_set_volume(op_player *p, int32_t volume);
 /*  指定，默认 48000 / 2。                                             */
 /* ================================================================== */
 
+/*
+ * 必须在 op_open **之前**调用：设备（和内部重采样器）是在 open 那一刻按这组参数
+ * 配置好的，open 之后再改，要么静默不生效，要么得把整条音频链路重启一遍。
+ * 默认 48000 / 2。
+ */
 OP_API op_result op_set_audio_format(op_player *p, int32_t sample_rate, int32_t channels);
 
 /* 返回实际读到的字节数；0 = 暂时没数据；< 0 = op_result 错误码 */
@@ -229,7 +287,7 @@ OP_API int32_t   op_audio_pending(op_player *p);
 OP_API int64_t   op_audio_latency_ms(op_player *p);
 
 /* ================================================================== */
-/*  查询（线程安全，任意线程可调）                                       */
+/*  查询（线程安全，任意线程可调）             状态：已实现（T2 缓存）   */
 /* ================================================================== */
 
 OP_API int64_t   op_position_ms(op_player *p);
@@ -237,6 +295,7 @@ OP_API int64_t   op_duration_ms(op_player *p);
 OP_API int32_t   op_state_of  (op_player *p);   /* op_state */
 OP_API int32_t   op_has_video (op_player *p);
 OP_API int32_t   op_has_audio (op_player *p);
+OP_API int32_t   op_is_music  (op_player *p);
 OP_API int32_t   op_is_stream (op_player *p);
 
 #ifdef __cplusplus
@@ -274,7 +333,10 @@ OP_API int32_t   op_is_stream (op_player *p);
  *   op_set_event_cb          →  PlayerCore::setEventCallBack
  *   op_set_video_cb          →  DemuxThread::openFile 里的 PaintFrame 回调
  *   op_open                  →  CMD_OPEN（obj = 路径 + 回调 + IAudioOutput）
- *   op_play/pause/stop       →  CMD_PLAY / CMD_PAUSE / CMD_STOP
+ *   op_play                  →  CMD_PAUSE(arg1=0)
+ *                               （**注意**：core 里的 CMD_PLAY 是空实现，别去"补"它 ——
+ *                                实际播放/暂停只有 CMD_PAUSE 一条路，arg1 表示目标状态）
+ *   op_pause / op_stop       →  CMD_PAUSE(arg1=1) / CMD_STOP
  *   op_seek_ms               →  CMD_SEEK
  *   op_step_frame            →  CMD_STEP_FORWARD / CMD_STEP_BACKWARD
  *   op_set_speed             →  CMD_SET_SPEED

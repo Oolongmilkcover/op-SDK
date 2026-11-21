@@ -67,6 +67,36 @@ set_target_properties(op_core PROPERTIES
     AUTORCC OFF
 )
 
+# ============================ SDK 门面 ============================
+# 门面单独成一个 target，不塞进 op_core，理由：
+#   1. op_core 是"内核"—— 只想要内核的人（比如上游 Qt 播放器）不该被迫连带拿到 C 接口；
+#   2. 门面是唯一对 CMD_*/EVT_* 做映射的地方，T4 还要往里塞拉模式的音频缓冲，
+#      它会比内核长得快，混在一个库里以后不好拆；
+#   3. 现在是 STATIC：Windows 上 SHARED 要配 OP_BUILD_SHARED + dllexport，
+#      而 MSVC 和 MinGW 两条工具链都得照顾。等阶段 3 要稳定 ABI 时再切。
+add_library(op_sdk STATIC
+    src/op_player.cpp
+    # 公开头文件挂在这里，IDE（Qt Creator / VS）的工程树才列得出来 ——
+    # 只写在 install(FILES ...) 里的话，IDE 是看不见的。
+    include/op/op_player.h
+)
+
+# PUBLIC：调用方要拿到 op_core 的头文件路径和 FFmpeg 依赖
+target_link_libraries(op_sdk PUBLIC op_core)
+
+# 公开头文件是 UTF-8 **with BOM**：它的注释全是中文，而 MSVC 默认按系统代码页
+# （中文 Windows = 936/GBK）读源文件，不带 BOM 又不加 /utf-8 就会刷 C4819，
+# 运气不好还会把注释里的多字节序列解析成引号/花括号。BOM 是唯一"不需要消费方
+# 配合开关"的解法 —— 而它极容易在重写文件时被工具丢掉，所以在这里钉一下。
+# 只报警不 FATAL：编不编得过是编译器的事，但不该让它静默退化。
+file(READ ${CMAKE_CURRENT_SOURCE_DIR}/include/op/op_player.h
+     _op_hdr_head OFFSET 0 LIMIT 3 HEX)
+if(NOT _op_hdr_head STREQUAL "efbbbf")
+    message(WARNING
+        "include/op/op_player.h 丢了 UTF-8 BOM（当前开头字节 ${_op_hdr_head}）。"
+        "补回来，否则 MSVC 消费者不加 /utf-8 时会刷 C4819。")
+endif()
+
 # ============================ 单测（无桌面也能跑） ============================
 option(OP_BUILD_TESTS "构建 core 的单测" ON)
 if(OP_BUILD_TESTS)

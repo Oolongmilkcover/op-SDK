@@ -17,3 +17,16 @@ add_test(NAME framequeue COMMAND test_framequeue)
 # "找不到平台插件"直接失败
 set_tests_properties(framequeue PROPERTIES
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+# C 接口冒烟测试（T1 验收）：create → 查版本 → destroy，且未实现的接口必须
+# 明确返回 OP_ERR_UNSUPPORTED。链 op_sdk（而不是 op_core）—— 测的就是调用方的用法。
+add_executable(test_api
+    test_api.cpp
+)
+
+target_link_libraries(test_api PRIVATE op_sdk)
+
+add_test(NAME api COMMAND test_api)
+
+# destroy 要 join 所有线程。万一哪天死锁了，别让 ctest 永远挂着。
+set_tests_properties(api PROPERTIES TIMEOUT 30)
