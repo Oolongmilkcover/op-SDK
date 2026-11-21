@@ -144,8 +144,13 @@ void PlayerCore::setMessageHandler()
                  * MessageLoopThread::loop() 在本回调返回后会统一 free_l(obj)。
                  * 所以 UI 侧只能当场把内容拷走（Player::onEVT_ERROR 里就是
                  * QString::fromStdString 拷一份），不能存指针。
+                 *
+                 * 判空不是防御性编程：m_callBack 是 std::function，谁忘了
+                 * setEventCallBack() 就直接调 operator()，会抛 std::bad_function_call
+                 * —— 异常没人接就是 std::terminate()，表现是"一打开文件进程就没了"。
+                 * 门面（op_set_event_cb）完全可以合法地不注册回调，这里必须容得住。
                  */
-                m_callBack(msg);
+                if (m_callBack) m_callBack(msg);
                 break;
 
 
@@ -199,7 +204,18 @@ void PlayerCore::setMessageHandler()
 
 
             default:
-                // 未识别的 what：直接忽略（obj 仍由消息循环统一释放）
+                /*
+                 * 未识别的 what 也转给注册了回调的一方（门面）。
+                 *
+                 * 门面需要"在消息循环线程上执行一小段代码"的能力：像 STATE 这种
+                 * 内核没有数据源、必须由门面合成的事件，按契约只能在消息循环线程上
+                 * 触发，而门面自己只有调用方线程。它投一条私有 id 的消息过来
+                 * （obj 是 op_event*），由这里原样转发 —— 等于把"投递"当线程切换用。
+                 *
+                 * 不注册回调时照旧丢弃；obj 无论如何都由 MessageLoopThread::loop()
+                 * 统一用 free_l 释放，所以这里**不能**消费它。
+                 */
+                if (m_callBack) m_callBack(msg);
                 break;
         }
     };

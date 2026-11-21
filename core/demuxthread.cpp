@@ -677,6 +677,13 @@ void DemuxThread::run()
                         m_videoDecodeThread->setLastSome(false);
                         m_eof.store(false);
                         /*
+                         * 播完 → 推一条 EVT_COMPLETED（门面映射成 OP_EVENT_COMPLETED）。
+                         * 必须放在下面"流媒体 / 播放列表 / 重播"三条收尾之前：它们会让
+                         * 读位置离开文件尾（seek(0) / 切下一集），之后再想判断"刚播完"
+                         * 就没有依据了。EVT_COMPLETED 以前只在枚举里存在、从没人发过。
+                         */
+                        m_msgQue->push(std::move(m_msgQue->getMsg(PlayerEvent::EVT_COMPLETED)));
+                        /*
                          * 流媒体：既不重播也不切下一集（这两个机制对直播都没意义），
                          * 直接暂停停在尾帧。否则下面的 seek(0.0) 会被 requestSeekMs
                          * 的流媒体闸门挡掉，然后反复触发 EOF —— 变成忙等。
@@ -696,6 +703,8 @@ void DemuxThread::run()
                     if (m_audioThread->isPlayFinished()) {
                         // 播完了
                         m_eof.store(false);
+                        // 同视频分支：先把"播完"通知出去，再决定流媒体暂停 / 切下一集 / 重播
+                        m_msgQue->push(std::move(m_msgQue->getMsg(PlayerEvent::EVT_COMPLETED)));
                         //流媒体同视频分支：不重播、不切下一集，暂停收尾
                         if(m_isStreamMedia.load()){
                             setPause(true);
