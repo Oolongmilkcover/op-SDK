@@ -465,7 +465,7 @@ OP_API void op_destroy(op_player *p)
     if (!p) return;
 
     /*
-     * ① **先摘日志回调，再停线程**。顺序反了的话，core 的线程在 stop() / join
+     *    **先摘日志回调，再停线程**。顺序反了的话，core 的线程在 stop() / join
      *    期间还会打日志，而调用方这时很可能已经开始拆 UI（user 指针失效）。
      *    摘掉之后那几行关机日志退回 stderr —— 用"退出安全"换"少几行日志"。
      *    如果这是最后一个注册了回调的 player，refreshSinkLocked 会把 sink 也卸掉。
@@ -478,7 +478,7 @@ OP_API void op_destroy(op_player *p)
     }
 
     /*
-     * ② 显式 stop() 再 delete：stop() 会 join 消息循环（→ 此后不再有事件回调）以及
+     *    显式 stop() 再 delete：stop() 会 join 消息循环（→ 此后不再有事件回调）以及
      *    demux / 解码 / 渲染 / 音频线程，返回后进程里没有线程还拿着 p。
      *    ~PlayerCore 里还会再调一次 stop()，那是幂等的（看 m_stopped）。
      */

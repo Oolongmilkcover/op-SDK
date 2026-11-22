@@ -79,6 +79,8 @@ add_library(op_sdk STATIC
     # 公开头文件挂在这里，IDE（Qt Creator / VS）的工程树才列得出来 ——
     # 只写在 install(FILES ...) 里的话，IDE 是看不见的。
     include/op/op_player.h
+    src/audioring.h src/audioring.cpp
+
 )
 
 # PUBLIC：调用方要拿到 op_core 的头文件路径和 FFmpeg 依赖

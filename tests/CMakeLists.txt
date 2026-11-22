@@ -30,3 +30,18 @@ add_test(NAME api COMMAND test_api)
 
 # destroy 要 join 所有线程。万一哪天死锁了，别让 ctest 永远挂着。
 set_tests_properties(api PROPERTIES TIMEOUT 30)
+
+# 环形缓冲 / 环形 sink 单测（T4 Step 1+2）：纯 C++，不碰 FFmpeg、不出声、没有媒体文件。
+add_executable(test_audioring
+    test_audioring.cpp
+)
+
+target_link_libraries(test_audioring PRIVATE op_sdk)
+
+# 它测的是 src/ 里的内部类，不是公开接口，所以单独把 src/ 加进 include 路径
+target_include_directories(test_audioring PRIVATE ${PROJECT_SOURCE_DIR}/src)
+
+add_test(NAME audioring COMMAND test_audioring)
+
+# 里面有一个 1MB 的 SPSC 并发用例，Debug 下也别给太紧的时间
+set_tests_properties(audioring PROPERTIES TIMEOUT 60)
