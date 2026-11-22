@@ -31,14 +31,24 @@
 | 项 | 状态 |
 |---|---|
 | `core/` 零 Qt | ✅ 构建参数里没有任何 Qt 路径，`AUTOMOC/AUTUIC/AUTORCC` 全关 |
-| `op_core` 静态库 | ✅ 能编（`build/op_core.lib`） |
+| `op_core` 静态库 | ✅ 能编 |
+| `op_sdk` 静态库（门面 + 环形 sink） | ✅ MSVC 19.40 与 MinGW 13.1 都编过、都跑过 ctest |
 | `tests/test_framequeue` | ✅ `ALL TESTS PASSED`（FrameQueue 状态机，headless） |
-| 对外 C 接口 | ⚠️ **只有设计稿** `include/op/op_player.h`，**没有任何实现** |
-| 门面（pimpl） | ❌ 不存在 |
-| console 示例 | ❌ 不存在 |
-| 鸿蒙壳 | ❌ 不存在（DevEco 工程都还没建） |
+| `tests/test_api`（T1/T2 验收） | ✅ 含"打不开的文件 → ERROR → 回 IDLE"端到端；断言回调不在调用方线程 |
+| `tests/test_audioring`（T4 Step 1/2） | ✅ 8 组（绕回/对齐/字节→毫秒/外推夹紧/暂停冻结/过期上报/SPSC 1MB） |
+| 对外 C 接口 | ✅ T1/T2 已实现（open/play/pause/stop/seek/step/speed + 事件 + 查询 + 日志） |
+| 视频帧（T3） | ⚠️ 链路已通（真文件验过 320×240 / 854×480 / H.264），但**没有 console 示例落仓库** |
+| 音频 pull（T4） | 🚧 **做到 Step 2**：ring + sink + 单测已完成；门面和 core 还没接上 |
+| fd 打开（T5） | ❌ 未开始（`op_open` 现在对 `fd >= 0` 直接返回 `OP_ERR_UNSUPPORTED`） |
+| console 示例 / 鸿蒙壳 | ❌ 不存在 |
 
-也就是说：**内核是能用的，但"SDK"只完成了一半 —— 只有壳没做**。
+**已知未解决（下一个助手请优先看这条）**：**暂停状态下 `op_seek_ms` 不重绘、落点也不生效**
+—— 实测 seek 到 1500ms 后 `frames=0`、恢复播放却从 ~120ms 继续，且一次 seek 收到**两条**
+`SEEK_DONE`。`op_seek_ms` 只投了一条 `CMD_SEEK`、拆包也对，嫌疑在 core 的
+`doSeek()` / `repaintPts()`（含早退分支也会补发 `SEEK_DONE`）。拖动进度条是这个 SDK 最核心的
+交互，这条不通，桌面壳和鸿蒙壳都会踩。
+
+也就是说：**内核 + C 门面（T1/T2）是能用的；T4 的音频还差"接线"，T3 差验收物，seek 有个真 bug**。
 
 ---
 
@@ -111,24 +121,99 @@
 
 ## 8. 第一阶段任务清单（照做即可）
 
-### T1 · C 门面骨架（先跑通"能创建/销毁/读状态"）
-- 新增 `src/op_player.cpp`（pimpl：`struct op_player { core::PlayerCore core; PlayerContext ctx; ... }`）
-- 实现 `op_create / op_destroy / op_version / op_set_event_cb / op_set_video_cb`
-- CMake 加 `add_library(op_sdk SHARED ...)` 或把门面加进 `op_core`（二选一，说明理由）
-- **验收**：一个 `tests/test_api.cpp` 能 `op_create` → 查版本 → `op_destroy`，不崩、无泄漏（能跑就行）
+### T1 · C 门面骨架 ✅ 已完成
+- `src/op_player.cpp`：pimpl 包住 `PlayerCore` + `PlayerContext`
+- 已实现：`op_create / destroy / version / 三个回调注册 / open / play / pause / stop / seek / step / speed`
+- 门面是独立的 `op_sdk`（STATIC）target，不塞进 `op_core` —— 理由写在 `CMakeLists.txt` 里
+- **验收**：`tests/test_api.cpp`（已通过）
 
-### T2 · 事件映射
-- 把 core 的 `EVT_*` 映射成 `op_event`（`OPENED/POSITION/STATE/SEEK_DONE/COMPLETED/ERROR`）
-- `arg1/arg2` 里的打包值（时长、`w<<16|h`、seek 高低 32 位）拆成结构体字段
-- **验收**：console 示例能打印出 `OPENED` 的时长/宽高
+### T2 · 事件映射 ✅ 已完成
+- `EVT_* → op_event`，`arg1/arg2` 拆包（时长、`w<<16|h`、seek 高低 32 位）
+- 状态机由门面合成（`OPENING/PLAYING/PAUSED/ENDED/IDLE`）。`STATE` 事件走
+  "门面投私有消息 id → `PlayerCore` 的 `default` 分支转发"，这样回调仍在消息循环线程上
+- 最近已知状态缓存进 atomic；查询接口读缓存，**不读** `PlayerContext`（它慢一个消息往返）
+- `EVT_COMPLETED` 在 core 播完的两个分支里补发（以前只在枚举里、从没人发）
 
-### T3 · 视频帧
-- 把 `PaintFrame` 回调转成 `op_video_cb`，填 `op_frame`（`data/linesize/width/height/pts_ms`）
-- **验收**：console 示例把前 10 帧存成 PPM（能肉眼看）
+### T3 · 视频帧 ⚠️ 链路已通，缺验收物
+- `PaintFrame → op_video_cb`；`op_frame` 是**紧凑连续缓冲**（`data/size/linesize[4]`），
+  `linesize` 用 `av_image_fill_linesizes()` 按紧凑布局重算 —— **不能抄源 AVFrame 的对齐值**
+  （宽 854 时源是 864，抄过去消费方会逐行读越界）
+- 回调返回后 `av_frame_free`（core 的 painter 是把所有权交出来的）
+- 已验：320×240 MPEG4、854×480（奇数宽）、640×360 H.264；`step ±1` 出帧正常
+- **缺**：`examples/console` —— 原来"存 10 帧 PPM"的验收物没有落进仓库
 
-### T4 · 音频 pull
-- 实现一个内部环形缓冲 sink（满足 `IAudioOutput`），对外暴露 `op_audio_read / op_audio_pending / op_audio_latency_ms`
-- **验收**：console 示例把 10 秒 PCM 写进 `.pcm`，`ffplay -f s16le -ar 48000 -ac 2` 能放
+### T4 · 音频 pull（B 方案）🚧 做到 Step 2
+
+> 目标：把桌面的 push 出口（`IAudioOutput`，设备给 `getFree`）包成 C 接口的 pull
+> （`op_audio_read`，壳来拉）。**不是**"壳自己解码"：解码一直在 core 里，
+> 壳只负责把 PCM 塞进设备。
+
+#### 数据流与时钟（先把账算清）
+
+```text
+core 音频解码线程 ──IAudioOutput::write()──> [AudioRing] ──sink.read()──> 壳（QAudioSink / AudioRenderer / AudioTrack）
+                                                  ↑                              │
+                                           setDevicePendingMs(ms) ←──────────────┘
+```
+
+core 的时钟（`AudioThread::getPts()`）：`clock = 最后写入帧的 pts − getNoPlayMs() × speed`
+
+"还没播"的数据同时躺在两处：**ring 里未读走的**（SDK 知道）+ **设备里已读走未播的**（只有壳知道）。
+所以 B 方案的全部内容就是：**壳回传设备积压，SDK 把两处加起来**。
+
+- `getNoPlayMs()` 返回**设备时间（毫秒）**；core 会乘 `speed` 换成内容时间，ring 侧不要乘
+- `bytesPerMs = sr × ch × 2 / 1000`（48k/2ch = 192）；反向换算用 `bytes × 1000 / (sr × ch × 2)`
+
+#### 已完成（Step 1 + Step 2）
+
+- `src/audioring.h/.cpp`：`AudioRing`（SPSC 字节环，2 的幂容量、`&mask` 取模、
+  读写持锁但 `available/space` 只读原子）+ `AudioRingSink : IAudioOutput`
+- `tests/test_audioring.cpp`：8 组（绕回 / 帧对齐 / 满时写 0 / 字节→毫秒 / 外推夹紧 /
+  暂停冻结 / 过期上报 / **SPSC 1MB 并发**），MSVC 与 MinGW 都 3/3 通过
+- 可直接用的接口：`sink.read(buf,cap)` / `availableBytes()` / `getNoPlayMs()` /
+  `setDevicePendingMs(ms)` / `AudioRingSink(0)`（0 = 按 open 的采样率自动算 300ms）
+
+#### 待做
+
+- **Step 3 · 打通采样率**：`AudioThread` 里 `m_outSampleRate = 48000 / m_outChannels = 2`
+  是**硬编码且没有 setter**，`op_set_audio_format` 传下去到不了它。改 4 处（内部签名，不动 C 接口）：
+  `CMD_OPEN_OBJ` 加 `audioSampleRate/audioChannels` → `DemuxThread::openFile(...)` →
+  `AudioThread::open(stream, out, sr, ch)` → 在 `resampleInit()` 和 `m_out->open(sr,ch)` **之前**赋值。
+- **Step 4 · 门面接线**：`op_player` 持有 sink（生命周期必须比 core 长，`op_destroy` 先
+  `core.stop()` 再销毁）；`op_open` 把 sink 当 `CMD_OPEN_OBJ::out` 传进去（现在传 `nullptr`）；
+  `op_audio_read → sink.read()`、`op_audio_pending → availableBytes()`、
+  `op_audio_latency_ms → getNoPlayMs()`；新增 `op_audio_set_device_pending_ms(op_player*, int32_t)`。
+- **Step 5 · 头文件**：宣布新函数、把"音频=桩"改成"已实现"、写明 `read() 返回 0 = 没数据`；
+  改完**必须复查 BOM**（`CMakeLists.txt` 有配置期告警）。
+- **Step 6 · 验收**：见下。
+
+#### 陷阱（推演过 / 踩过，别再犯）
+
+| 陷阱 | 后果 | 正确做法 |
+|---|---|---|
+| `getNoPlayMs()` 只算 ring、不算设备积压 | 时钟超前 → 视频判"落后音频" → 疯狂丢帧（实测 3 秒只渲染 6 帧） | 加上壳回传的设备积压 |
+| 把上报值当实时值 | 时钟阶梯状，A/V 一顿一顿 | 锚点 + 按真实时间**线性外推** |
+| 外推不夹紧 | 时钟倒退或穿到未来 | `≥0`；暂停时停止外推；`≤ 距上次 clear 的时间` |
+| 用"距上次 write 的时间"当上界 | 把合法积压压没（100ms 的设备缓冲可以比它久） | **别用这条** |
+| `setPause` 先切标志再固化 | 暂停瞬间时钟倒退，恢复时跳 | 先算当前外推值固化，再切标志并重锚 |
+| seek 后不重锚 | 晚到的旧上报把时钟拽回旧位置 | `clear()` 同时清 ring、清积压、记 `lastClear` |
+| `getNoPlayMs()` 里加锁 / 调设备 API | 被 `getPts()` 高频调用，拖慢 demux | 只读原子量 |
+| `write()` 阻塞等空间 | 卡死 core 的音频解码线程 | 满了返回 0，core 自己有 1ms 轮询 |
+| 环容量非 2 的幂 / 用 `%` | 高频除法开销 | `& (cap-1)` |
+| `read()` 用 -1 表示没数据 | 门面把 `<0` 当 `op_result`，-1 = `OP_ERR_INVALID_ARG` | 没数据返回 **0** |
+
+#### 验收
+
+1. 10 秒 PCM 落盘 → `ffplay -f s16le -ar 48000 -ac 2` 能放（原始验收）
+2. **带音轨的视频**渲染帧数 ≈ 时长 × fps（现在是 6 帧/3s，目标 ~60 帧/3s）—— 这条才证明时钟对了
+3. `op_audio_latency_ms()` 稳定在几十 ms、不单调增长
+4. 长跑 5 分钟：`op_audio_pending()` 不打满、RSS 不涨
+
+**平台侧怎么写**（决定 B 准不准）：Qt 在 `QIODevice::readData(data,maxlen)` 里调
+`op_audio_read`，用 `bufferSize() − bytesFree()` 上报；鸿蒙用 `getAudioTime()` /
+`getWrittenDataSize()`；安卓用 `已写字节 − getPlaybackHeadPosition()×frameSize`。
+Qt 侧注意：`readData` 在音频线程、`op_seek_ms` 在 GUI 线程 —— 过期上报就出在这里，
+靠 `clear()` 的夹紧兜住。
 
 ### T5 · fd 打开
 - `op_open_options.fd` 生效：内部用 `avformat_open_input` + 自定义 AVIO（或 `pipe:`/`fd:` 协议）
@@ -142,19 +227,22 @@
 ## 9. 文件导航
 
 ```text
-include/op/op_player.h   ← 唯一的对外接口（目前是设计稿，T1 之后变成真实现）
+include/op/op_player.h   ← 唯一的对外接口（T1/T2 已实现；T4 还要加 op_audio_set_device_pending_ms）
+src/                     ← C 门面：只有这一层出现 C++ 类型，调用方看不见
+  op_player.cpp         ←   pimpl：PlayerCore + PlayerContext + 事件映射 + 状态缓存（+日志广播）
+  audioring.h/.cpp      ←   T4：SPSC 字节环 + AudioRingSink（IAudioOutput 的实现）
 core/                    ← 内核：27 个文件，零 Qt
   playercore.h          ←   C++ 入口（postMessage / 事件回调 / start-stop）
   messagequeue.h        ←   消息定义（CMD_* / EVT_* / CTX_*）
   playercontext.h       ←   状态广播（只给 UI 看，不能当状态源）
   demuxthread.h         ←   解封装 + seek + 逐帧回填
-  audiothread.h         ←   音频解码 + atempo 倍速 + 音频时钟
+  audiothread.h         ←   音频解码 + atempo 倍速 + 音频时钟（采样率硬编码，T4 Step 3 要打通）
   videodecodethread.h   ←   视频解码 + 像素格式统一
   videorenderthread.h   ←   节奏 / 同步 / 丢帧
   framequeue.h          ←   未来环 + 历史窗口（逐帧核心）
-  iaudiooutput.h        ←   音频出口接口（push）→ T4 要包成 pull
+  iaudiooutput.h        ←   音频出口接口（push）→ T4 的 ring sink 实现它
   frameconverter.h      ←   swscale 转 YUV420P（加锁）
-tests/                   ← 只有 FrameQueue 单测，T1 之后要加 api 测
+tests/                   ← test_framequeue / test_api / test_audioring，全部进 ctest、headless
 docs/SDK-PLAN.md         ← 分阶段计划与验收标准（细节在这里）
 ```
 
@@ -180,5 +268,6 @@ cmake --build build && ctest --test-dir build --output-on-failure
 
 ## 11. 一句话总结给用户的 AI
 
-> 这个仓库的内核已经能用了，缺的是"外壳"：C 门面、事件映射、pull 音频、fd 打开、console 示例。
-> 按 `docs/SDK-PLAN.md` 的阶段走，每步都要能编、能测、能演示。
+> 内核 + C 门面（T1/T2）已经能用了：open/play/pause/stop/seek/step/speed、事件、日志、视频帧都通，
+> MSVC 与 MinGW 双工具链 ctest 3/3。接下来按第 8 节做 T4（音频 pull 的 Step 3/4 接线），
+> 再做 T5（fd），并修掉第 2 节那个"暂停中 seek 不重绘"的 bug。每步都要能编、能测、能演示。
