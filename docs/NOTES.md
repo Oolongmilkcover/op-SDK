@@ -228,8 +228,8 @@ headless ctest 替代不了 —— 它们验的是时钟，不是接线。
 ## 2026-11-23 · 自定义 AVIO：把文件描述符变成 FFmpeg 的输入
 
 > T5。代码：`core/fdavio.h` `.cpp`、`core/demuxthread.cpp` 的 `openFile()`、
-> `tests/test_fdavio.cpp`。AVIO 本身的概念和最小示例见配套的《AVIO学习笔记》
-> （独立文档，不在本仓库）；这里只记**本项目里的决定和踩过的坑**。
+> `tests/test_fdavio.cpp`。AVIO 本身的概念和最小示例见 [`docs/AVIO.md`](AVIO.md)；
+> 这里只记**本项目里的决定和踩过的坑**。
 
 ### 1. 问题：picker 只给 fd
 

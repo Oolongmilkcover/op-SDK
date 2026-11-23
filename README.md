@@ -67,12 +67,13 @@ op-SDK/
 │   ├── frameconverter.*      #   swscale → YUV420P（加锁，跨线程共用）
 │   ├── iaudiooutput.h        #   音频出口接口（push；对外要包成 pull）
 │   ├── log.h / perfclock.h   #   日志 / 纳秒时钟
-├── src/                      # C 门面：op_player.cpp + audioring.h/.cpp
-├── tests/                    # FrameQueue / API / AudioRing 单测（CTest 注册）
+├── src/                      # C 门面：op_player.cpp + audioring.h/.cpp（fdavio 在 core/）
+├── tests/                    # FrameQueue / API / AudioRing / fdAVIO 单测（CTest 注册）
 ├── cmake/FFmpeg.cmake        # ffmpeg_deps（Win: FFMPEG_PATH / Linux: pkg-config）
 └── docs/
     ├── SDK-PLAN.md           # 分阶段计划与验收标准
-    └── NOTES.md              # 开发笔记（AudioRing 的 SPSC 环与时钟设计）
+    ├── NOTES.md              # 开发笔记（AudioRing / 自定义 AVIO）
+    └── AVIO.md               # AVIO 学习笔记（概念、示例、缓冲、排查表）
 ```
 
 ---
