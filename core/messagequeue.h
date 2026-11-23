@@ -1,6 +1,7 @@
 #ifndef MESSAGEQUEUE_H
 #define MESSAGEQUEUE_H
 #include <condition_variable>
+#include <cstdint>
 #include<functional>
 #include <mutex>
 #include <string>   // getMsg()/getErrorMsg() 里用到 std::string；libstdc++ 的 <condition_variable> 只带前置声明，
@@ -88,13 +89,25 @@ class IAudioOutput;
 
 struct CMD_OPEN_OBJ
 {
+    /*
+     * fd >= 0 时走自定义 AVIO（T5），此时 name 只当"扩展名提示"：
+     * avformat 会拿它猜格式，但不会真的去打开这个路径（AVFMT_FLAG_CUSTOM_IO）。
+     * fd 归调用方所有，core 只读不关；offset/size 的语义见 op_open_options。
+     */
+    int         fd       = -1;
+    int64_t     fdOffset = 0;
+    int64_t     fdSize   = 0;
     std::string name;                       // 路径 / URL
     std::function<void(AVFrame*)> cb;       // 视频帧回调
     IAudioOutput *out = nullptr;            // 音频输出（可为空 → 无声音）
+    int outSampleRate = 0;                  // 输出采样率
+    int outChannels = 0;                    // 输出通道数
 
     CMD_OPEN_OBJ() = default;
-    CMD_OPEN_OBJ(std::string n, std::function<void(AVFrame*)> c, IAudioOutput *o)
-        : name(std::move(n)), cb(std::move(c)), out(o) {}
+    CMD_OPEN_OBJ(int fd_, int64_t offset, int64_t size, std::string n,
+                 std::function<void(AVFrame*)> c, IAudioOutput *o, int sampleRate, int channels)
+        : fd(fd_), fdOffset(offset), fdSize(size), name(std::move(n)),
+          cb(std::move(c)), out(o), outSampleRate(sampleRate), outChannels(channels) {}
 };
 
 struct MessageNode{

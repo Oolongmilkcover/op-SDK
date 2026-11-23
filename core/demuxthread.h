@@ -21,6 +21,8 @@ Seek 功能
 
 struct AVFormatContext;
 struct AVDictionary;
+struct AVIOContext;
+namespace core { struct FdInput; }   // T5：fd 打开的输入参数（core/fdavio.h）
 class VideoDecodeThread;
 class AudioThread;
 class VideoWidget;
@@ -43,8 +45,9 @@ public:
     void setMessageQueue(MessageQueue* msgQue);
 
 
-    //打开文件
-    bool openFile(const char* url,PaintFrame cb , IAudioOutput* out);
+    //打开文件；fdIn 非空且 fd>=0 时走自定义 AVIO（路径只当扩展名提示用）
+    bool openFile(const char* url,PaintFrame cb , IAudioOutput* out , int sampleRate , int channels ,
+                  const core::FdInput* fdIn = nullptr);
     
     //启动所有线程
     void start();
@@ -132,6 +135,9 @@ public:
 private:
     void setDone();
 
+    //释放 fd 打开时建的 AVIO（幂等；fmt_ctx 可能已经为 null）
+    void releaseFdAvio();
+
     void videoCallSeek(long long ms);
 
     void checkTimeToPostPosition();
@@ -173,6 +179,12 @@ private:
     std::atomic<bool> m_isExit{false};
     //解封装上下文
     AVFormatContext* m_fmt_ctx = nullptr;
+    /*
+     * T5：fd 打开时我们自己建的 AVIO。
+     * 它必须活到 avformat_close_input 之后 —— demux 线程整个播放期间都在从这里读，
+     * 而 avformat_close_input 因为置了 AVFMT_FLAG_CUSTOM_IO 不会替我们释放它。
+     */
+    AVIOContext* m_fdAvio = nullptr;
     //配置
     AVDictionary* m_option = nullptr;
     //音视频线程

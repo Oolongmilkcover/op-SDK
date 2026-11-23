@@ -45,3 +45,13 @@ add_test(NAME audioring COMMAND test_audioring)
 
 # 里面有一个 1MB 的 SPSC 并发用例，Debug 下也别给太紧的时间
 set_tests_properties(audioring PROPERTIES TIMEOUT 60)
+
+# fd 自定义 AVIO 单测（T5）：造一个临时文件，只用 avio_read/avio_seek/avio_size
+# 验证"虚拟文件"的 offset / size / EOF / 越界夹紧。不需要媒体文件，headless 可跑。
+add_executable(test_fdavio
+    test_fdavio.cpp
+)
+
+target_link_libraries(test_fdavio PRIVATE op_core)
+
+add_test(NAME fdavio COMMAND test_fdavio)

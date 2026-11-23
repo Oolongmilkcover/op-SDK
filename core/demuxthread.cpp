@@ -5,6 +5,7 @@
 #include <cstdlib>   // std::getenv：seek 诊断开关
 #include <thread>
 #include "core/audiothread.h"
+#include "core/fdavio.h"
 #include "core/videodecodethread.h"
 #include "core/messagequeue.h"
 
@@ -105,6 +106,27 @@ DemuxThread::~DemuxThread()
     }
 
     avformat_close_input(&m_fmt_ctx);
+    releaseFdAvio();
+}
+
+/*
+ * 释放 fd 打开时建的 AVIO。
+ *
+ * 为什么单独一个函数、而不是在 close() 里内联三行：
+ *   openFile() 有 5 条失败路径（alloc 失败 / 鉴权失败 / 读流信息失败 / 没有流 /
+ *   解码器打开失败），每条都要收；漏一条就是"打开失败后 fd AVIO 泄漏"。
+ *   这个函数幂等（m_fdAvio 为空直接返回），可以随便调。
+ *
+ * 顺序：先把 fmt_ctx->pb 摘成 nullptr 再释放。fmt_ctx 可能已经关了（pb 是野指针），
+ * 所以只在 fmt_ctx 非空时摘 —— 真正的释放由 closeFdAvio 完成。
+ */
+void DemuxThread::releaseFdAvio()
+{
+    if (!m_fdAvio)
+        return;
+    if (m_fmt_ctx)
+        m_fmt_ctx->pb = nullptr;
+    core::closeFdAvio(&m_fdAvio);
 }
 
 void DemuxThread::setPlayerContext(PlayerContext *ctx)
@@ -117,18 +139,32 @@ void DemuxThread::setMessageQueue(MessageQueue *msgQue)
     m_msgQue = msgQue;
 }
 
-bool DemuxThread::openFile(const char* url,PaintFrame cb , IAudioOutput* out)
+bool DemuxThread::openFile(const char* url,PaintFrame cb , IAudioOutput* out , int sampleRate , int channels ,
+                           const core::FdInput* fdIn )
 {
-    if (url == 0 || url[0] == '\0' || !m_playerctx){
+    if (!m_playerctx) {
         return false;
     }
-    close();
+
+    /*
+     * path 和 fd 二选一（见 include/op/op_player.h），fd 优先。
+     * 鸿蒙/安卓的 picker 给的就是 fd；传给 FFmpeg 的 url 这时只当"扩展名提示"，
+     * 有它能让格式探测少猜几次，没有也能靠内容探测（自定义 AVIO 不会被打开）。
+     */
+    const bool hasFd = (fdIn && fdIn->fd >= 0);
+    if (!hasFd && (url == nullptr || url[0] == '\0')) {
+        return false;
+    }
+
+    close();   // 换文件：先把上一轮（含上一轮的 fd AVIO）收干净
     m_isExit.store(false);          // 上一轮 close() 置过停止标志，这里复位再开新的一轮
     m_msgQue->push(std::move(m_msgQue->getMsg(ContextChange::CTX_IS_EXIT,0)));
     m_serial.store(0); //每次加载时serial清零
     m_seekPauseing.store(false); //兜底：清掉上一次可能残留的“seek 进行中”
     //这次打开的是不是网络流媒体（先算出来，成功后再写进成员，失败不污染状态）
-    const bool streamMedia = isStreamUrl(url);
+    //fd 打开不可能是网络流；url 只有在没有 fd 时才参与判断
+    const bool streamMedia = !hasFd && isStreamUrl(url);
+    const std::string openName = (url && url[0]) ? std::string(url) : std::string("fd");
 
     bool tmpRet = true;
     {
@@ -161,18 +197,38 @@ bool DemuxThread::openFile(const char* url,PaintFrame cb , IAudioOutput* out)
         //（只留下它没识别的项），只设一次的话第二次打开就丢参数了。
         av_dict_set_int(&m_option, "rw_timeout", NETWORK_RW_TIMEOUT_US, 0);
 
+        /*
+         * T5：fd 打开。先建 AVIO，再把 fmt_ctx 的 pb 指过去并置 AVFMT_FLAG_CUSTOM_IO。
+         *
+         * 这个 flag 是必须的：不带它，avformat_close_input() 会按"pb 是它自己打开的"
+         * 去 avio_closep()，而我们的 pb 由 core::closeFdAvio() 负责 —— 会双重释放。
+         * 置上之后 open 端会跳过 init_input 的协议打开（也不会去碰 url）。
+         */
+        if (hasFd) {
+            std::string avioErr;
+            m_fdAvio = core::openFdAvio(*fdIn, &avioErr);
+            if (!m_fdAvio) {
+                logDebug() << "openFdAvio failed:" << avioErr;
+                closeAVThread();
+                return false;
+            }
+            m_fmt_ctx->pb = m_fdAvio;
+            m_fmt_ctx->flags |= AVFMT_FLAG_CUSTOM_IO;
+        }
+
         //2.打开解封装打开输入流
-        int ret = avformat_open_input(&m_fmt_ctx, url, NULL, &m_option);
+        int ret = avformat_open_input(&m_fmt_ctx, openName.c_str(), NULL, &m_option);
         if (ret < 0) {
             char err_buf[AV_ERROR_MAX_STRING_SIZE];
             av_strerror(ret, err_buf, sizeof(err_buf));
-            logDebug()<< "open" << url << "failed!:" << err_buf;
+            logDebug()<< "open" << openName << "failed!:" << err_buf;
             // 释放已创建的线程
             closeAVThread();
             if (m_fmt_ctx) {
                 avformat_close_input(&m_fmt_ctx);
                 m_fmt_ctx = nullptr;
             }
+            releaseFdAvio();
             return false;
         }else{
             //中断回调已在 open 之前挂好（见上），这里直接读流信息
@@ -210,7 +266,7 @@ bool DemuxThread::openFile(const char* url,PaintFrame cb , IAudioOutput* out)
             }
             logDebug()<<"totalMs:" << totalMs ;
             //打印视频流详细信息
-            av_dump_format(m_fmt_ctx, 0, url, 0);
+            av_dump_format(m_fmt_ctx, 0, openName.c_str(), 0);
         } else {
             totalMs = 0;
         }
@@ -253,6 +309,7 @@ bool DemuxThread::openFile(const char* url,PaintFrame cb , IAudioOutput* out)
             avformat_close_input(&m_fmt_ctx);
             m_fmt_ctx = nullptr;
         }
+        releaseFdAvio();
         return false;
     }
     if (m_hasVideo){
@@ -269,7 +326,7 @@ bool DemuxThread::openFile(const char* url,PaintFrame cb , IAudioOutput* out)
     }
     if (m_hasAudio){
         //打开音频解码器和处理线程
-        if(!m_audioThread->open(m_fmt_ctx->streams[m_audioStream],out)){
+        if(!m_audioThread->open(m_fmt_ctx->streams[m_audioStream],out,sampleRate , channels)){
             logDebug() << "音频打开失败，降级为静音播放";
             /*
              * open() 是按「解码器 → 重采样 → 声卡 → atempo 滤镜」的顺序初始化的，
@@ -290,6 +347,11 @@ bool DemuxThread::openFile(const char* url,PaintFrame cb , IAudioOutput* out)
     m_videoDecodeThread->setHasAudio(m_hasAudio);
     if(!tmpRet){
         closeAVThread();
+        if (m_fmt_ctx) {
+            avformat_close_input(&m_fmt_ctx);
+            m_fmt_ctx = nullptr;
+        }
+        releaseFdAvio();
         return tmpRet;
     }else{
         isCompleteInit = true;
@@ -560,6 +622,7 @@ void DemuxThread::close()
         avformat_close_input(&m_fmt_ctx);
         m_fmt_ctx = nullptr;
     }
+    releaseFdAvio();   // fd 打开的输入：AVIO 必须活到 close_input 之后才能放
     m_videoStream = -1;
     m_audioStream = -1;
     totalMs = 0;

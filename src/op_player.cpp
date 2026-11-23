@@ -37,6 +37,7 @@
 #include "core/messagequeue.h"
 #include "core/playercore.h"
 #include "core/playercontext.h"
+#include "src/audioring.h"
 
 extern "C" {
 #include <libavutil/frame.h>
@@ -149,14 +150,16 @@ std::function<void(AVFrame*)> videoCB(op_video_cb cb, void* user_data) {
  * 不透明句柄的真身。
  *
  * 成员顺序不是随手排的：析构按**声明逆序**进行，而 PlayerCore 的析构会走 stop()
- * → join 所有线程，这期间 DemuxThread 还会读 PlayerContext（DemuxThread::setPause
- * 里读 getIsSeeking）。所以 ctx 必须声明在 core 之前，保证它比 core 活得久。
+ * → join 所有线程。这些线程活着的时候还在用另外两个成员：
+ *   - DemuxThread 会读 PlayerContext（setPause 里读 getIsSeeking）；
+ *   - 音频播放线程会往 AudioRingSink 里 write()。
+ * 所以 ctx 和 sink 都必须声明在 core **之前**，保证它们比 core 活得久。
  */
 struct op_player
 {
     PlayerContext ctx;
+    AudioRingSink sink;   // 默认 300ms 环形缓冲；core 通过 IAudioOutput* 往里写
     PlayerCore    core;
-
     /* ------------------------------------------------------------------
      * 最近已知状态（T2）
      *
@@ -169,6 +172,11 @@ struct op_player
     std::atomic<int32_t> state{OP_STATE_IDLE};
     std::atomic<int32_t> width{0};
     std::atomic<int32_t> height{0};
+    // 头文件承诺的默认输出格式。必须在这里给初值：core 的 AudioThread::open()
+    // 现在会拒绝 <=0 的参数，留 0 的话"没调过 op_set_audio_format"的播放器
+    // 会直接降级成静音（has_audio=false），看起来像"WAV 里没有音轨"。
+    std::atomic<int32_t> outSampleRate{48000};
+    std::atomic<int32_t> outChannels{2};
     std::atomic<int32_t> hasVideo{0};
     std::atomic<int32_t> hasAudio{0};
     std::atomic<int32_t> isStream{0};
@@ -483,6 +491,7 @@ OP_API void op_destroy(op_player *p)
      *    ~PlayerCore 里还会再调一次 stop()，那是幂等的（看 m_stopped）。
      */
     p->core.stop();
+    p->sink.close();
     delete p;
 }
 
@@ -543,17 +552,19 @@ OP_API op_result op_open(op_player *p, const op_open_options *opt)
     if (!opt) return OP_ERR_INVALID_ARG;
 
     /*
-     * fd 打开是 T5 的活：core 的 CMD_OPEN 只认 CMD_OPEN_OBJ 里的 path，arg1 里的
-     * fd 根本没人读。以前把 fd 塞进 arg1 = 静默丢弃，调用方只能看到"打开失败"，
-     * 所以这里明说"还不支持"。
+     * path 和 fd 二选一（见头文件）：fd >= 0 优先。
+     * 判断必须写 >= 0 —— fd 0 是合法描述符（虽然通常是 stdin），用 > 0 会把它当成"没给"。
      */
-    if (opt->fd >= 0) return OP_ERR_UNSUPPORTED;
+    const int fd = opt->fd >= 0 ? opt->fd : -1;
+    if (fd < 0 && (!opt->path || opt->path[0] == '\0'))
+        return OP_ERR_INVALID_ARG;
 
     /*
-     * path 和 fd 二选一（见头文件）。两个都没给时这里必须判空 ——
-     * 直接把 nullptr 喂给 std::string 的构造函数是未定义行为，多半当场崩。
+     * path 为空时给空串：nullptr 喂给 std::string 的构造函数是未定义行为。
+     * 有 fd 时 name 只当"扩展名提示"（"a.mp4" 能让 avformat 探测格式少猜几次），
+     * 不会被真的打开。
      */
-    if (!opt->path || opt->path[0] == '\0') return OP_ERR_INVALID_ARG;
+    const std::string name = opt->path ? opt->path : "";
 
     // 上一个文件的缓存不能带过来（时长/宽高/音视频标志/流标志）
     p->durationMs.store(0);
@@ -563,13 +574,13 @@ OP_API op_result op_open(op_player *p, const op_open_options *opt)
     p->hasVideo.store(0);
     p->hasAudio.store(0);
     p->isStream.store(0);
-
     /*
      * 视频回调可以为空（纯音频文件根本没有帧要送）；videoCB 内部对空 cb 会直接
      * 释放 AVFrame，所以这里不需要"必须先注册视频回调"这种前置条件。
      */
-    CMD_OPEN_OBJ *obj = new CMD_OPEN_OBJ(std::string(opt->path),
-                                         videoCB(p->videoCb, p->videoUser), nullptr);
+    CMD_OPEN_OBJ *obj = new CMD_OPEN_OBJ(fd, opt->fd_offset, opt->fd_size, name,
+                                         videoCB(p->videoCb, p->videoUser), &p->sink,
+                                         p->outSampleRate, p->outChannels);
     p->core.postMessage(PlayerCmd::CMD_OPEN, 0, 0, obj,
                         [](void *o) { delete static_cast<CMD_OPEN_OBJ *>(o); });
 
@@ -668,38 +679,41 @@ OP_API op_result op_set_audio_format(op_player *p, int32_t sample_rate, int32_t 
 {
     if (!p) return OP_ERR_INVALID_ARG;
     if (sample_rate <= 0 || channels <= 0) return OP_ERR_INVALID_ARG;
-    /*
-     * TODO(T4)：只记下来。设备（和 swr 的重采样目标）是在 open 那一刻配好的，
-     * 所以这个值必须在 op_open 之前生效 —— 这也是头文件里写"必须提前调"的原因。
-     */
-    return notImplemented("op_set_audio_format");
+    // 只记下来：真正的设备/重采样目标是在 op_open 那一刻按这组值配置的，
+    // 所以必须在 open 之前调（头文件里写死了这条）。open 之后再调不会生效。
+    p->outSampleRate.store(sample_rate);
+    p->outChannels.store(channels);
+    return OP_OK;
+}
+
+op_result op_audio_set_device_pending_ms(op_player *p, int32_t ms)
+{
+    if (!p || ms < 0) return OP_ERR_INVALID_ARG;
+    // 壳回传"设备里已读走但还没播"的毫秒数；sink 内部做锚点 + 外推 + 夹紧。
+    p->sink.setDevicePendingMs(ms);
+    return OP_OK;
 }
 
 OP_API int32_t op_audio_read(op_player *p, void *buf, int32_t capacity)
 {
     if (!p || !buf || capacity <= 0) return OP_ERR_INVALID_ARG;
-    /*
-     * TODO(T4)：从内部环形缓冲取数据（由 IAudioOutput 的 write() 灌进去）。
-     * 返回 0 表示"暂时没数据"，调用方睡 2~5ms 再来 —— 现在返回 UNSUPPORTED，
-     * 好让它知道是"没实现"而不是"没数据"。
-     */
-    return static_cast<int32_t>(notImplemented("op_audio_read"));
+    // 返回 0 = 暂时没数据（不是错误）。壳据此睡 2~5ms 再来，别忙转。
+    // 读走的字节是 S16 交错 PCM，格式见 op_set_audio_format。
+    return p->sink.read((uint8_t*)buf,capacity);
 }
 
 OP_API int32_t op_audio_pending(op_player *p)
 {
     if (!p) return OP_ERR_INVALID_ARG;
-    // TODO(T4)：返回环形缓冲里可读的字节数。桩返回 0（= 空），至少不会让调用方忙转。
-    notImplemented("op_audio_pending");
-    return 0;
+    // 环形缓冲里可读的字节数（不含设备里那份 —— 那份在 latency_ms 里）
+    return p->sink.availableBytes();
 }
 
 OP_API int64_t op_audio_latency_ms(op_player *p)
 {
     if (!p) return OP_ERR_INVALID_ARG;
-    // TODO(T4)：缓冲里还没被取走的时长。桩返回 0，音画同步会偏，但不会崩。
-    notImplemented("op_audio_latency_ms");
-    return 0;
+    // ring 未读走的 + 壳上报的设备积压；core 的音频时钟用它做延迟补偿。
+    return p->sink.getNoPlayMs();
 }
 
 /* ================================================================== */
@@ -742,3 +756,5 @@ OP_API int32_t op_is_music(op_player *p)
     // 纯音频 = 有音轨且没有视频轨（OPENED 之后才有意义，之前都是 0）
     return (p->hasAudio.load() && !p->hasVideo.load()) ? 1 : 0;
 }
+
+

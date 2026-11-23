@@ -1,4 +1,5 @@
 #include "core/playercore.h"
+#include "core/fdavio.h"
 #include "core/messageloopthread.h"
 #include "core/messagequeue.h"
 #include "core/playercontext.h"
@@ -49,7 +50,23 @@ void PlayerCore::setMessageHandler()
                     //obj=CMD_OPEN_OBJ*（路径 + 视频帧回调 + 音频输出），定义见 core/messagequeue.h
                     auto *op = static_cast<CMD_OPEN_OBJ*>(msg.obj);
                     m_playerctx->setSetPlayingName(op->name);
-                    if(!dt.openFile(op->name.c_str(), op->cb, op->out)){
+
+                    /*
+                     * fd 打开（T5）：把三个字段拼成 FdInput 交给 demux。
+                     * fdIn 只在栈上活到 openFile 返回 —— demux 建 AVIO 时把需要的值拷走，
+                     * 字节来源是 fd 本身（调用方持有），SDK 只读不关。
+                     */
+                    core::FdInput fdIn;
+                    const core::FdInput *fdPtr = nullptr;
+                    if (op->fd >= 0) {
+                        fdIn.fd     = op->fd;
+                        fdIn.offset = op->fdOffset;
+                        fdIn.size   = op->fdSize;
+                        fdPtr       = &fdIn;
+                    }
+
+                    if(!dt.openFile(op->name.c_str(), op->cb, op->out ,
+                                    op->outSampleRate , op->outChannels , fdPtr)){
                         postMessage(getErrorMsg("dt.openFile failed"));
                         return;
                     }

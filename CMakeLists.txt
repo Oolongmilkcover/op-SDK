@@ -26,6 +26,7 @@ set(OP_CORE_SOURCES
     core/perfclock.h
     core/log.h
     core/iaudiooutput.h
+    core/fdavio.h             core/fdavio.cpp
     core/frameconverter.h     core/frameconverter.cpp
     core/packetqueue.h        core/packetqueue.cpp
     core/framequeue.h         core/framequeue.cpp

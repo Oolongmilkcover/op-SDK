@@ -31,12 +31,14 @@ AudioThread::~AudioThread()
     m_frameQue = nullptr;
 }
 
-bool AudioThread::open(AVStream *audioStream, IAudioOutput* out)
+bool AudioThread::open(AVStream *audioStream, IAudioOutput* out , int sampleRate , int channels)
 {
-    if(!audioStream){
+    if(!audioStream || sampleRate <= 0 || channels <=0 || channels > 8){
         return false;
     }
     close();
+    m_outSampleRate = sampleRate;
+    m_outChannels = channels;
     m_audioStream = audioStream;
     if(out == nullptr){
         m_out = new NullAudioPlayer();

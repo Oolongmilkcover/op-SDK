@@ -1,23 +1,23 @@
-﻿/*
+/*
  * ============================================================================
  *  op_player.h —— 播放内核的 C 接口（唯一对外面）
  * ============================================================================
  *
  *  这份头文件放这里是给新仓库（SDK）当起点的：QtPlayer 自己**不编译、不链接**它。
  *
- *  【实现状态 · 2026-11-21】**T1 + T2 已实现；T3 已连通待真文件验收；T4/T5 还是桩**。
- *  已能用：create / destroy / version / 回调注册（事件 / 视频帧 / 日志）/ open /
- *  play / pause / stop / seek / step / speed，以及 EVT_* → op_event 的映射与状态缓存
- *  （op_state_of / position_ms / duration_ms / has_video / has_audio / is_music / is_stream）。
- *  仍是桩：音频 pull（T4）、fd 打开（T5）—— 返回 OP_ERR_UNSUPPORTED 并打一行日志，
- *  不会静默成功。下面每段的标题标了它属于哪个任务、现在是什么状态：
+ *  【实现状态 · 2026-11-23】**T1 / T2 / T4 / T5 已实现；T3 链路已通，缺 console 示例**。
+ *  已能用：create / destroy / version / 回调注册（事件 / 视频帧 / 日志）/ open（路径或 fd）/
+ *  play / pause / stop / seek / step / speed、EVT_* → op_event 的映射与状态缓存
+ *  （op_state_of / position_ms / duration_ms / has_video / has_audio / is_music / is_stream）、
+ *  以及拉模式的音频（op_audio_read / pending / latency_ms）。
+ *  下面每段的标题标了它属于哪个任务、现在是什么状态：
  *
  *      T1 骨架        create / destroy / version / 回调 / 播放控制    已实现
  *      T1+ 日志       op_set_log_cb ← core::setLogSink（进程级广播）  已实现
  *      T2 事件        EVT_* → op_event + 状态缓存 + 查询              已实现
- *      T3 视频帧      op_video_cb + op_frame（紧凑缓冲视图）           已连通
- *      T4 音频 pull   op_audio_read / pending / latency_ms            桩
- *      T5 fd 打开     op_open_options.fd（自定义 AVIO）                桩
+ *      T3 视频帧      op_video_cb + op_frame（紧凑缓冲视图）           已连通，缺示例
+ *      T4 音频 pull   op_audio_read / pending / latency_ms            已实现
+ *      T5 fd 打开     op_open_options.fd（自定义 AVIO）                已实现
  *
  *  为什么是 C 而不是 C++：
  *    鸿蒙只能经 NAPI 调 C 函数、安卓要走 JNI，C++ 对象（std::function / 虚表 /
@@ -198,11 +198,22 @@ typedef struct op_player op_player;
 /* --------------------------------------------------------------- 打开参数 */
 /*
  * 路径和 fd 二选一：fd >= 0 时优先用 fd（鸿蒙/安卓的文件选择器场景）。
- * fd 归调用方所有，SDK 不负责关闭它。
+ *
+ * fd 的约定（**很重要**）：
+ *   - fd 归调用方所有，SDK **不会** close 它；但播放期间必须一直开着 ——
+ *     demux 线程整个播放过程都在从这个 fd 读字节，关早了就是 EBADF / 花屏。
+ *   - SDK 会移动 fd 的读写位置（内部 seek 做格式探测、seek 定位）。播放期间
+ *     不要在别处用同一个 fd 读写；要并行读，请 dup() 一份。
+ *   - fd_offset：从第几个字节开始（容器嵌在别的文件里、或 picker 给了偏移）。
+ *   - fd_size：可读长度；0 = 自动探测（普通文件 = 文件大小 − fd_offset）。
+ *   - 只支持可 seek 的普通文件。管道/套接字也能打开，但没有时长、不能 seek ——
+ *     这些功能依赖"能跳到指定位置"。
+ *   - path 在有 fd 时变成**可选的扩展名提示**（"a.mp4" 能让格式探测少猜几次）；
+ *     给 nullptr 也没问题。
  */
 typedef struct op_open_options
 {
-    const char *path;           /* 本地路径或 URL（rtsp:// rtmp:// http:// ...） */
+    const char *path;           /* 本地路径或 URL（rtsp:// rtmp:// http:// ...）；有 fd 时可为 NULL */
     int32_t     fd;             /* 文件描述符；-1 表示不用 */
     int64_t     fd_offset;      /* fd 内的起始偏移，通常是 0 */
     int64_t     fd_size;        /* fd 可读长度，0 = 由 SDK 探测（普通文件） */
@@ -275,7 +286,7 @@ OP_API op_result op_set_speed(op_player *p, int32_t speed_x10);
  */
 
 /* ================================================================== */
-/*  音频：**拉模式**                               状态：桩（未实现，T4）   */
+/*  音频：**拉模式**                             状态：已实现（T4）      */
 /*                                                                    */
 /*  调用方在自己的音频线程里循环 op_audio_read()，把拿到的 PCM 写进     */
 /*  平台的 AudioRenderer / AudioTrack。返回 0 表示暂时没数据（别忙转，   */
@@ -291,6 +302,26 @@ OP_API op_result op_set_speed(op_player *p, int32_t speed_x10);
  * 默认 48000 / 2。
  */
 OP_API op_result op_set_audio_format(op_player *p, int32_t sample_rate, int32_t channels);
+
+/*
+ * 壳回传"已经读走、但设备里还没播出去"的毫秒数（B 方案的关键）。
+ *
+ * 为什么需要它：`op_audio_latency_ms()` 要算"总共还压着多少"，而积压同时躺在两处 ——
+ * SDK 的环形缓冲里（自己知道）+ 设备缓冲里（只有壳知道）。不报这一项，音频时钟
+ * 会超前，视频会误判"自己落后"然后疯狂丢帧。
+ *
+ * 怎么算（各平台一行）：
+ *   Qt     : bufferSize() − bytesFree()  换算成毫秒
+ *   鸿蒙   : getAudioTime() / getWrittenDataSize() 之类的积压量
+ *   安卓   : 已写字节 − getPlaybackHeadPosition() × frameSize，再换算成毫秒
+ *
+ * 什么时候调：设备写回调里顺手报一次即可（每隔几十毫秒一次足够）。
+ *   - SDK 按"锚点 + 线性外推"使用这个值，所以**不需要**报得很密；
+ *   - seek / flush 设备之后立刻报 0（SDK 在 clear() 后会削掉迟到的旧上报，
+ *     但仍建议主动报，响应更快）；
+ *   - 暂停时不用报，SDK 会冻结外推。
+ */
+OP_API op_result op_audio_set_device_pending_ms(op_player *p, int32_t ms);
 
 /* 返回实际读到的字节数；0 = 暂时没数据；< 0 = op_result 错误码 */
 OP_API int32_t   op_audio_read(op_player *p, void *buf, int32_t capacity);

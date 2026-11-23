@@ -16,10 +16,23 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
+#include <cstring>
 #include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
+
+#ifdef _WIN32
+#  include <fcntl.h>
+#  include <io.h>
+#  define T_OPEN(p)  _open(p, _O_RDONLY | _O_BINARY)
+#  define T_CLOSE(f) _close(f)
+#else
+#  include <fcntl.h>
+#  include <unistd.h>
+#  define T_OPEN(p)  ::open(p, O_RDONLY)
+#  define T_CLOSE(f) ::close(f)
+#endif
 
 static int g_fail = 0;
 
@@ -176,6 +189,57 @@ static void on_log_cb(void *user, int level, const char *line)
     static_cast<LogCapture *>(user)->push(level, line);
 }
 
+/* ---------------------------------------------------------------- 临时 WAV */
+/*
+ * T5 的验收不想依赖仓库里的媒体文件，所以现场合成一个 8kHz / 单声道 / 16bit 的
+ * 裸 PCM WAV。prefixBytes 用来模拟"容器前面还有别的数据"（picker 给 offset 的场景）。
+ *
+ * 手写 RIFF 头是刻意的：这样测试不依赖任何第三方编码器，也顺便说清了
+ * fd_offset 到底切在文件的哪个字节上。
+ */
+static bool writeTinyWav(const std::string &path, int prefixBytes, int ms)
+{
+    const int sampleRate = 8000;
+    const int channels   = 1;
+    const int frames     = sampleRate * ms / 1000;
+    const int dataBytes  = frames * channels * 2;
+
+    std::vector<uint8_t> d((size_t)prefixBytes + 44 + dataBytes, 0);
+    uint8_t *w = d.data() + prefixBytes;
+
+    auto put32 = [](uint8_t *p, uint32_t v) {
+        p[0] = (uint8_t)(v & 0xFF); p[1] = (uint8_t)((v >> 8) & 0xFF);
+        p[2] = (uint8_t)((v >> 16) & 0xFF); p[3] = (uint8_t)((v >> 24) & 0xFF);
+    };
+    auto put16 = [](uint8_t *p, uint16_t v) {
+        p[0] = (uint8_t)(v & 0xFF); p[1] = (uint8_t)((v >> 8) & 0xFF);
+    };
+
+    std::memcpy(w, "RIFF", 4);
+    put32(w + 4, (uint32_t)(36 + dataBytes));
+    std::memcpy(w + 8, "WAVE", 4);
+    std::memcpy(w + 12, "fmt ", 4);
+    put32(w + 16, 16);
+    put16(w + 20, 1);                       // PCM
+    put16(w + 22, (uint16_t)channels);
+    put32(w + 24, (uint32_t)sampleRate);
+    put32(w + 28, (uint32_t)(sampleRate * channels * 2));
+    put16(w + 32, (uint16_t)(channels * 2));
+    put16(w + 34, 16);
+    std::memcpy(w + 36, "data", 4);
+    put32(w + 40, (uint32_t)dataBytes);
+
+    for (int i = 0; i < frames; ++i) {
+        const short s = (short)(((i / 40) % 2) ? 2000 : -2000);   // 方波，非零即可
+        put16(w + 44 + i * 2, (uint16_t)s);
+    }
+
+    FILE *f = std::fopen(path.c_str(), "wb");
+    if (!f) return false;
+    const bool ok = std::fwrite(d.data(), 1, d.size(), f) == d.size();
+    return std::fclose(f) == 0 && ok;
+}
+
 /* 视频帧回调：本用例不播真文件，只是让"注册过回调"这件事成立 */
 static void dummy_video(void *user, const op_frame *f)
 {
@@ -236,9 +300,8 @@ int main()
         opt.path = nullptr;
         CHECK(op_open(p, &opt) == OP_ERR_INVALID_ARG);
 
-        // 只给 fd → fd 打开还没做（T5），要明说"不支持"，不能静默丢掉 fd
-        opt.fd = 0;
-        CHECK(op_open(p, &opt) == OP_ERR_UNSUPPORTED);
+        // fd 的合法值包含 0，所以这里不能用 fd=0 去测"没给 fd"——
+        // 真正的 fd 打开由第 9 节（合成 WAV → fd）端到端验证。
     }
 
     std::printf("== 5. 端到端：打不开的文件 → ERROR 事件 → 回到 IDLE\n");
@@ -265,13 +328,18 @@ int main()
         CHECK(cap.lastThread() != mainThread);
     }
 
-    std::printf("== 6. 仍是桩的接口：音频 pull（T4）\n");
+    std::printf("== 6. 音频 pull（T4）：没 open 时是「没数据」，不是错误\n");
     {
-        CHECK(op_set_audio_format(p, 48000, 2) == OP_ERR_UNSUPPORTED);
+        CHECK(op_set_audio_format(p, 48000, 2) == OP_OK);
         char buf[16] = {0};
-        CHECK(op_audio_read(p, buf, sizeof(buf)) < 0);    // < 0 是错误码
+        // 没 open → 没有环 → read 返回 0（暂时没数据），绝不能返回负数：
+        // 门面的约定是 <0 才是 op_result 错误码。
+        CHECK(op_audio_read(p, buf, sizeof(buf)) == 0);
         CHECK(op_audio_pending(p) == 0);
         CHECK(op_audio_latency_ms(p) == 0);
+        // 壳回传设备积压：没 open 时也允许调，值会被忽略
+        CHECK(op_audio_set_device_pending_ms(p, 50) == OP_OK);
+        CHECK(op_audio_set_device_pending_ms(p, -1) == OP_ERR_INVALID_ARG);
     }
 
     std::printf("== 7. 参数校验的边界值\n");
@@ -304,7 +372,56 @@ int main()
         CHECK(logs.lastThread() != mainThread);
     }
 
-    std::printf("== 9. destroy：必须 join 干净，可重复 create/destroy\n");
+    std::printf("== 9. fd 打开（T5）：合成 WAV → fd + offset → OPENED\n");
+    {
+        const std::string wavPath = "test_api_tmp.wav";
+        const int kPrefix = 100;                 // 模拟容器前面还压着别的东西
+
+        CHECK(writeTinyWav(wavPath, kPrefix, 1000));
+
+        const int fd = T_OPEN(wavPath.c_str());
+        CHECK(fd >= 0);
+        if (fd >= 0) {
+            op_player *q = op_create();
+            CHECK(q != nullptr);
+            if (q) {
+                Capture c2;
+                op_set_event_cb(q, on_event_cb, &c2);
+
+                op_open_options opt{};
+                opt.fd        = fd;              // 关键：只给 fd
+                opt.fd_offset = kPrefix;         // 跳过前面的垃圾字节
+                opt.fd_size   = 0;               // 0 = 自动探测
+                opt.path      = wavPath.c_str(); // 只当扩展名提示
+                CHECK(op_open(q, &opt) == OP_OK);
+
+                CHECK(c2.waitFor(OP_EVENT_OPENED, 5000));
+                Recorded r;
+                CHECK(c2.find(OP_EVENT_OPENED, &r));
+                CHECK(r.has_audio == 1);
+                CHECK(r.has_video == 0);
+                // 1 秒的 WAV：时长必须接近 1000ms（offset 切错就会读不到 data 块）
+                CHECK(r.duration_ms >= 900 && r.duration_ms <= 1100);
+
+                // 顺带验 T4 的接线：open 之后音频环里应该很快就能拉到 PCM
+                bool gotPcm = false;
+                for (int i = 0; i < 200 && !gotPcm; ++i) {
+                    char pcm[4096];
+                    if (op_audio_read(q, pcm, sizeof(pcm)) > 0)
+                        gotPcm = true;
+                    else
+                        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                }
+                CHECK(gotPcm);
+
+                op_destroy(q);
+            }
+            T_CLOSE(fd);   // fd 归调用方：SDK 全程没关过它，这里由测试来关
+        }
+        std::remove(wavPath.c_str());
+    }
+
+    std::printf("== 10. destroy：必须 join 干净，可重复 create/destroy\n");
     const size_t logCountBeforeDestroy = logs.count();
     op_destroy(p);
     op_destroy(nullptr);   // 空指针必须容错

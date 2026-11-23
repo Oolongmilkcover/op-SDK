@@ -17,7 +17,7 @@ public:
     ~AudioThread();
 
     // 初始化音频
-    bool open(AVStream *audioStream , IAudioOutput* out);
+    bool open(AVStream *audioStream , IAudioOutput* out , int sampleRate , int channels);
 
     // 关闭
     void close();
