@@ -41,7 +41,8 @@
 | 视频帧（T3） | ⚠️ 链路已通（真文件验过 320×240 / 854×480 / H.264），但**没有 console 示例落仓库** |
 | 音频 pull（T4） | ✅ 已接线（ring + sink + 门面 + 采样率贯通）；**正式验收还缺真实媒体** |
 | fd 打开（T5） | ✅ 已实现（`core/fdavio.*` 自定义 AVIO，支持 offset/size，不可 seek 降级） |
-| console 示例 / 鸿蒙壳 | ❌ 不存在 |
+| 消费者示例（`examples/qtplayer`） | 🚧 壳已入库（`app/` + `platform/` + `resources/`），内核与门面靠 `add_subdirectory(../..)` 复用主仓库；**Qt 适配未完成**：`app/` 还在直接用 core 的 C++ 类，没走 `op_*` |
+| 鸿蒙壳 | ❌ 不存在 |
 
 **已知未解决（下一个助手请优先看这条）**：**暂停状态下 `op_seek_ms` 不重绘、落点也不生效**
 —— 实测 seek 到 1500ms 后 `frames=0`、恢复播放却从 ~120ms 继续，且一次 seek 收到**两条**
@@ -263,6 +264,8 @@ tests/                   ← test_framequeue / test_api / test_audioring / test_
 docs/SDK-PLAN.md         ← 分阶段计划与验收标准
 docs/NOTES.md            ← 开发笔记：为什么这么设计、踩过的坑（AudioRing / 自定义 AVIO）
 docs/AVIO.md             ← AVIO 学习笔记：概念、最小示例、缓冲行为、排查表
+examples/                ← 消费者示例（**独立子项目**，故意不进根构建）
+  qtplayer/              ←   Qt6 播放器壳：只放 app/platform/resources，内核与门面 add_subdirectory 复用主仓库
 ```
 
 ---
