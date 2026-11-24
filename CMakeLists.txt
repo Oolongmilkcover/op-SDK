@@ -87,6 +87,14 @@ add_library(op_sdk STATIC
 # PUBLIC：调用方要拿到 op_core 的头文件路径和 FFmpeg 依赖
 target_link_libraries(op_sdk PUBLIC op_core)
 
+# ============================ 消费者示例 ============================
+# examples/qtplayer 是用这个 SDK 做出来的 Qt 播放器壳，**故意不 add_subdirectory**：
+#   1. 它自己的 CMakeLists 里也定义了 op_core 这个 target，并进来会直接 target 重名；
+#   2. 它依赖 Qt6，而本仓库的硬约束是"SDK 零 Qt"—— 不能让它污染默认构建
+#      （Linux CI、鸿蒙交叉编译都不该被 Qt 拖住）。
+# 它是独立子项目：用 Qt Creator 单独打开 examples/qtplayer/CMakeLists.txt，
+# 原因和适配步骤见 examples/README.md。
+
 # 公开头文件是 UTF-8 **with BOM**：它的注释全是中文，而 MSVC 默认按系统代码页
 # （中文 Windows = 936/GBK）读源文件，不带 BOM 又不加 /utf-8 就会刷 C4819，
 # 运气不好还会把注释里的多字节序列解析成引号/花括号。BOM 是唯一"不需要消费方
