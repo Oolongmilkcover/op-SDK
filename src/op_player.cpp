@@ -26,6 +26,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstdlib>
 #include <mutex>
 #include <new>
@@ -369,6 +370,12 @@ void onCoreMessage(op_player *p, PlayerMessage &msg)
         op_event ev{};
         ev.type        = OP_EVENT_POSITION;
         ev.position_ms = msg.arg1;
+        ev.speedX10 = (int32_t)std::lround(p->ctx.getSpeed() * 10.0);
+        /*
+         * 注意 ×10 这一步不能省：PlayerContext 里存的是**真实倍率**（1.0 / 1.5 / 2.0），
+         * 而 op_event 的约定是 ×10 的整数（10 = 1.0x）。直接把 double 赋给 int32_t 会得到
+         * 1 / 1 / 2，0.5x 还会被截成 0 —— 壳的倍速标签就全错了。
+         */
         deliver(p, ev);
         return;
     }

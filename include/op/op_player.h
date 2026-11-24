@@ -16,7 +16,7 @@
  *      T1+ 日志       op_set_log_cb ← core::setLogSink（进程级广播）  已实现
  *      T2 事件        EVT_* → op_event + 状态缓存 + 查询              已实现
  *      T3 视频帧      op_video_cb + op_frame（紧凑缓冲视图）           已连通，缺示例
- *      T4 音频 pull   op_audio_read / pending / latency_ms            已实现
+ *      T4 音频 pull   op_audio_read / pending / latency_ms          已实现
  *      T5 fd 打开     op_open_options.fd（自定义 AVIO）                已实现
  *
  *  为什么是 C 而不是 C++：
@@ -131,6 +131,8 @@ typedef struct op_event
     int32_t     height;
     int64_t     duration_ms;
     int64_t     position_ms;
+    int32_t     speedX10;       /* 倍速 ×10（10 = 1.0x；范围 5~20）。目前随 POSITION 事件带出，
+                                   方便壳的倍速标签跟着走 —— 别用它当"状态源"，要权威值就缓存它 */
     int32_t     has_video;      /* OPENED：有无视频；BUFFERING：1/0 */
     int32_t     has_audio;
     int32_t     is_stream;      /* 网络流（RTSP/RTMP/HLS...）时为 1 */
