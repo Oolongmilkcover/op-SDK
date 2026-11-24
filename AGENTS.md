@@ -289,6 +289,23 @@ cmake --build build && ctest --test-dir build --output-on-failure
 之后，用 `cmake --build build --clean-first`，否则会拿到"编过了但其实是旧代码"的
 二进制 —— 失败现象看起来像业务 bug（踩过一次：枚举值改了而门面没重编，事件全错位）。
 
+**改完 `include/op/op_player.h` 再配置一次，看这条告警有没有出现**：
+
+```text
+CMake Warning at CMakeLists.txt:98 (message):
+  include/op/op_player.h 丢了 UTF-8 BOM（当前开头字节 2f2a0d）
+```
+
+这个文件的 BOM 已经被编辑工具剥掉**三次**了（每次都是"保存时按普通 UTF-8 写"）。
+BOM 是"MSVC 消费者不加 `/utf-8` 也能正确读中文注释"的唯一解法，别当垃圾删掉。
+补回来（PowerShell，注意 `$true` 才是带 BOM）：
+
+```powershell
+$p = (Resolve-Path include/op/op_player.h).Path
+$c = Get-Content $p -Raw -Encoding utf8
+[System.IO.File]::WriteAllText($p, $c, (New-Object System.Text.UTF8Encoding($true)))
+```
+
 ---
 
 ## 11. 一句话总结给用户的 AI
