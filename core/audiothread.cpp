@@ -17,7 +17,8 @@ extern"C"{
 AudioThread::AudioThread(int frameQueSize , bool keep_last )
 {
     m_frameQue = new FrameQueue(frameQueSize,keep_last);
-    m_pktQue = new PacketQueue();
+    // 音频包队列恒 100（一包 1~2KB，整队才 200KB，没有砍的必要）
+    m_pktQue = new PacketQueue(core::kAudioPacketQueueSize);
     m_isExit = true;
 }
 

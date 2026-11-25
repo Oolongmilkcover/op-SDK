@@ -230,10 +230,16 @@ int32_t op_is_audio_media(p); // 容器本身是纯音频（mp3/flac/aac…）�
 int32_t op_get_width(p);
 int32_t op_get_height(p);
 int32_t op_get_speedX10(p);  // 倍速 ×10
+int32_t op_platform();       // OP_PLATFORM_*，编译期定的，进程常量
+int32_t op_is_mobile();      // 1 = 移动档（Android / 鸿蒙），0 = 桌面档
 ```
 
 查询接口读的是门面的状态缓存，**任意线程可调**，不会阻塞。
 但它是"此刻"的值，不是某个历史事件的快照。
+
+`op_platform()` / `op_is_mobile()` 没有 `op_player*` 参数：平台是进程级属性，
+在 `op_create` 之前就能问。**壳不要自己写 `#ifdef`** —— 内核按目标平台选了
+哪一档参数，就该由它自己回答（见第 12 节"平台档位"）。
 
 ---
 
@@ -244,7 +250,7 @@ int32_t op_get_speedX10(p);  // 倍速 ×10
 | `op_play` / `op_pause` | 异步；状态查询要等 `STATE` 事件或轮询 |
 | `op_stop` | 回到 IDLE，句柄仍可复用（内部销毁解码线程） |
 | `op_seek_ms` | 异步；一次请求**恰好一条** `SEEK_DONE`（含早退路径） |
-| `op_step_frame(p, ±1)` | 仅暂停态、有视频、非流媒体；`-1` 靠 48 帧历史回填 |
+| `op_step_frame(p, ±1)` | 仅暂停态、有视频、非流媒体；`-1` 靠 48 帧历史回填。**移动档整条关闭**，恒返回 `OP_ERR_UNSUPPORTED` |
 | `op_exit_frame_step` | 退出逐帧，播放位置对齐到当前显示帧 |
 | `op_set_speed(p, 5~20)` | ×10，0.5x~2.0x；流媒体返回 `OP_ERR_UNSUPPORTED` |
 
@@ -276,6 +282,25 @@ op_set_log_cb(p, on_log, user);   // level: 0=debug 1=info 2=warn 3=error
 
 ## 12. 平台接入要点
 
+### 平台档位（编译期选定，运行时查询）
+
+参数档位在 `core/platform.h` 里按目标平台选，**不是运行时探测**：
+
+| 档位 | 视频帧队列 | 历史队列 | 逐帧 | 视频包队列 |
+|---|---|---|---|---|
+| Windows / Linux 桌面 | 16 帧 | 48 帧 | 可用 | 100 包 |
+| Android / 鸿蒙 | 8 帧 | 关闭 | 关闭（`OP_ERR_UNSUPPORTED`） | 50 包 |
+
+- 差别主要在内存：历史队列里每帧都 clone 住一整帧转换后的 buffer，1080p × 48 帧
+  ≈ 150MB（720p 也有 66MB），而且播放约 2 秒后就常驻满 —— 手机上是"被系统 kill"
+  级别的开销。帧队列 8 帧 @24fps 仍有 ≈333ms 的预解码余量，不影响流畅度。
+- 移动端的壳用 `op_is_mobile()` 把"上一帧/下一帧"按钮灰掉，别等点了才报错。
+- 判定链顺序是 `__ANDROID__ → __OHOS__ → _WIN32 → __linux__`：鸿蒙的 clang 同时
+  定义 `__OHOS__` 和 `__linux__`，顺序写反会把鸿蒙当成桌面 Linux，而且不报错。
+- 桌面 Linux 走桌面档；未知平台也按桌面档（宁可多占内存，不少功能）。
+- `op_create()` 会打一行 `[op_sdk] platform=... frameQueue=... history=... step=...`，
+  真机上先看这行确认档位对不对。
+
 **Qt**：
 - 事件/视频回调 → `QMetaObject::invokeMethod(..., Qt::QueuedConnection)`。
 - 音频：给 `QAudioSink` 一个只读 `QIODevice`，在 `readData()` 里调 `op_audio_read`；
@@ -302,6 +327,7 @@ op_set_log_cb(p, on_log, user);   // level: 0=debug 1=info 2=warn 3=error
 | `op_open` 立即返回但没后续 | 正常，结果通过 `OPENED`/`ERROR` 通知 |
 | 画面花屏/斜切 | 逐行上传时用了源 `AVFrame` 的对齐 `linesize`，应该用 `op_frame.linesize` |
 | 鸿蒙上 fd 打开失败 | fd 必须可 seek 的普通文件；播放期间不能关 |
+| 移动端点逐帧没反应 | 移动档（`op_is_mobile()==1`）没有历史队列，逐帧整体关闭；用 `op_is_mobile()` 提前灰掉按钮 |
 
 ---
 

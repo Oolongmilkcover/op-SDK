@@ -1,5 +1,6 @@
 #include "core/demuxthread.h"
 #include "core/log.h"
+#include "core/platform.h"
 #include <cctype>
 #include <chrono>
 #include <cstdlib>   // std::getenv：seek 诊断开关
@@ -422,6 +423,13 @@ void DemuxThread::startFrameStep()
 {
     if (!m_hasVideo || !m_videoDecodeThread) return;
     if (m_isStreamMedia.load()) return;            //流媒体没有可回退的"帧位置"，不支持逐帧      
+    /*
+     * 移动档整条关掉（core/platform.h 的 kFrameStepSupported）。
+     * 不只是"省内存"：历史队列一关，stepForward 就只能消耗已经预解码的那 8 帧，
+     * 用完以后解码线程在暂停态不产帧 → 逐帧会卡死。**必须和关历史是同一个开关**，
+     * 否则表现是"逐帧走两步就不动了"，比没有这个功能更难解释。
+     */
+    if (!core::kFrameStepSupported) return;
     if(m_isFrameStep.load()){
         return;//已经在逐帧了
     }

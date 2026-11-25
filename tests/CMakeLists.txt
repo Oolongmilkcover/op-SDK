@@ -44,6 +44,11 @@ add_executable(test_api
 target_link_libraries(test_api PRIVATE op_sdk)
 op_deploy_runtime(test_api)
 
+# test_api 现在会断言"门面查询到的平台档位 == core::platform.h 的编译期常量"，
+# 直接引了 core/platform.h。静态库模式下 op_core 把源码根 PUBLIC 出去，动态库模式
+# 不导出内部路径，所以这里显式加仓库根（仅测试用，不进安装包）。
+target_include_directories(test_api PRIVATE ${PROJECT_SOURCE_DIR})
+
 add_test(NAME api COMMAND test_api)
 
 # destroy 要 join 所有线程。万一哪天死锁了，别让 ctest 永远挂着。

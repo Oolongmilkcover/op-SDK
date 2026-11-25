@@ -65,6 +65,35 @@ extern "C" {
 //唯一支持的格式
 #define OP_PIX_FMT_YUV420P 0
 
+/* --------------------------------------------------------------- 平台档位 */
+/*
+ * SDK 在**编译时**按目标平台选定一档参数（队列深度 / 历史队列 / 逐帧），
+ * 运行时用这两个函数查询。壳靠它决定"逐帧按钮要不要显示"，内核靠它决定
+ * "历史队列开不开" —— 两边必须是同一个答案，所以别在壳里自己写 #ifdef，
+ * 调 op_platform() / op_is_mobile()，单一真源在 core/platform.h。
+ *
+ *   op_is_mobile() == 0（Windows / Linux 桌面）
+ *       视频帧队列 16、历史 48 帧、逐帧可用、视频包队列 100
+ *   op_is_mobile() == 1（Android / 鸿蒙）
+ *       视频帧队列 8、无历史、逐帧关闭（op_step_frame 返回 OP_ERR_UNSUPPORTED）、
+ *       视频包队列 50
+ *
+ * 桌面 Linux 算桌面档；没识别出来的平台也按桌面档（宁可多占内存，不少功能）。
+ * 枚举值只会往后追加，已有值的含义不会变，所以按数值比较是安全的 ——
+ * 但判断"是不是移动端"请直接用 op_is_mobile()。
+ */
+typedef enum op_platform
+{
+    OP_PLATFORM_UNKNOWN   = 0,      /* 没识别出来（按桌面档跑） */
+    OP_PLATFORM_WINDOWS   = 1,
+    OP_PLATFORM_LINUX     = 2,      /* 桌面 Linux（ctest / 开发机） */
+    OP_PLATFORM_ANDROID   = 3,
+    OP_PLATFORM_HARMONYOS = 4       /* OpenHarmony / HarmonyOS NEXT */
+} op_platform_t;
+
+OP_API int32_t op_platform(void);   /* 返回 op_platform_t；进程常量，任意线程可调 */
+OP_API int32_t op_is_mobile(void);  /* 1 = 移动档（Android / 鸿蒙），0 = 桌面档 */
+
 /* --------------------------------------------------------------- 错误码 */
 typedef enum op_result
 {
@@ -269,7 +298,9 @@ OP_API op_result op_seek_ms(op_player *p, int64_t ms);
 
 
 /* 逐帧：dir 取 +1（下一帧）或 -1（上一帧，靠回填）。纯音频/流媒体返回 OP_ERR_UNSUPPORTED。
- 在逐帧期间，壳的音频播放需要调用方设为静音 */
+ 在逐帧期间，壳的音频播放需要调用方设为静音
+ 移动档（op_is_mobile()==1）没有历史队列，**整条逐帧关闭**，这里直接返回
+ OP_ERR_UNSUPPORTED —— 壳应该用 op_is_mobile() 提前把按钮灰掉，别等点了才报错。 */
 OP_API op_result op_step_frame(op_player *p, int32_t dir);
 //退出逐帧
 OP_API op_result op_exit_frame_step(op_player *p);

@@ -32,7 +32,8 @@ static int64_t framePtsMs(const AVFrame* f, AVRational timeBase)
 VideoDecodeThread::VideoDecodeThread(int frameSize, bool keep_last )
 {
     m_frameQue = new FrameQueue(frameSize,keep_last);
-    m_pktQue = new PacketQueue();
+    // 包队列按档位给：移动端 50（≈2s @25fps），桌面 100。见 core/platform.h
+    m_pktQue = new PacketQueue(core::kVideoPacketQueueSize);
     m_videoRenderThread = new VideoRenderThread(m_frameQue);
 
     //历史耗尽 → 让 demux 线程向后 seek 回填（回调在渲染线程里执行，只写原子量）

@@ -79,6 +79,16 @@ private:
 
 public:
 
+    /*
+     * maxSize 是"包数"上限，内部 clamp 到 [1, 4096]。
+     *
+     * 旧实现是 `maxSize > 100 ? maxSize : 100` —— 也就是**不能低于 100**。
+     * 那是上游桌面播放器留下的默认值；移动档要传 50，这个下限会让配置静默失效
+     * （传 50 实际还是 100，不报错、日志也看不出来），所以改成真正的 clamp。
+     * 4096 只是防止误传天文数字。
+     *
+     * 具体档位在 core/platform.h：视频 50（移动）/100（桌面），音频恒 100。
+     */
     explicit PacketQueue(int maxSize = 100);
 
     ~PacketQueue();

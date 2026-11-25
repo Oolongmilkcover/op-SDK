@@ -9,6 +9,7 @@
 #define VIDEODECODETHREAD_H
 
 #include "core/decodethread.h"
+#include "core/platform.h"
 #include <thread>
 #include <atomic>
 #include <functional>
@@ -22,7 +23,15 @@ public:
     //同步时间，由外部传入
     void setSynpts(long long synpts);
 
-    explicit VideoDecodeThread(int frameSize = 100 , bool keep_last = true);
+    /*
+     * 默认值来自 core/platform.h 的档位，不再写死 100：
+     *   - 桌面：帧队列 16 + 历史 48 帧（逐帧回退要用）；
+     *   - 移动：帧队列 8 + 无历史（省内存，逐帧关闭）。
+     * 原来默认传 100 是被 FrameQueue 的 clamp 压到 16 的，读起来像"能配 100 帧"，
+     * 其实配不上去 —— 现在直接写真实档位。
+     */
+    explicit VideoDecodeThread(int frameSize = core::kVideoFrameQueueSize,
+                               bool keep_last = core::kKeepFrameHistory);
     ~VideoDecodeThread();
     //
     bool open(AVStream* videoStream , PaintFrame cb);

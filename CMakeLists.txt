@@ -35,6 +35,7 @@ include(cmake/FFmpeg.cmake)
 set(OP_CORE_SOURCES
     core/perfclock.h
     core/log.h
+    core/platform.h            # 编译期平台档位（队列深度 / 历史 / 逐帧）
     core/iaudiooutput.h
     core/fdavio.h             core/fdavio.cpp
     core/frameconverter.h     core/frameconverter.cpp

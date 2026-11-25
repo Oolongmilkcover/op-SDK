@@ -12,6 +12,7 @@
  * 不需要任何媒体文件、不出声、不上屏，所以和 test_framequeue 一样能 headless 跑。
  */
 #include "op/op_player.h"
+#include "core/platform.h"
 
 #include <chrono>
 #include <condition_variable>
@@ -248,6 +249,39 @@ int main()
         CHECK(op_version(nullptr, nullptr) == OP_OK);   // 两个参数都可以是 NULL
     }
 
+    /*
+     * 平台档位：门面查询接口必须和 core 里的编译期常量一致。
+     * 这条是"壳看到的档位 == 内核实际用的档位"的唯一保证 —— 两边一旦漂移，
+     * 移动端就会出现"按钮亮着但点了返回 UNSUPPORTED"这类最难解释的现象。
+     */
+    std::printf("== 1b. op_platform / op_is_mobile 与编译期档位一致\n");
+    {
+        const int32_t pf = op_platform();
+        CHECK(pf == static_cast<int32_t>(core::kPlatform));
+        CHECK(op_is_mobile() == (core::kIsMobile ? 1 : 0));
+
+        // 枚举覆盖：不认识的平台不能谎报成某个已知平台
+        CHECK(pf >= OP_PLATFORM_UNKNOWN && pf <= OP_PLATFORM_HARMONYOS);
+
+        // 移动端必须"8 帧 + 无历史 + 无逐帧"，桌面必须"16 帧 + 有历史 + 有逐帧"
+        CHECK(core::kVideoFrameQueueSize == (core::kIsMobile ? 8 : 16));
+        CHECK(core::kKeepFrameHistory == !core::kIsMobile);
+        CHECK(core::kFrameStepSupported == !core::kIsMobile);
+        CHECK(core::kVideoPacketQueueSize == (core::kIsMobile ? 50 : 100));
+
+        // 本机（构建它的人）必须是已知平台，否则 _WIN32/__OHOS__ 判定链写漏了
+        CHECK(pf != OP_PLATFORM_UNKNOWN);
+#if defined(_WIN32)
+        CHECK(pf == OP_PLATFORM_WINDOWS);
+#elif defined(__ANDROID__)
+        CHECK(pf == OP_PLATFORM_ANDROID);
+#elif defined(__OHOS__)
+        CHECK(pf == OP_PLATFORM_HARMONYOS);
+#elif defined(__linux__)
+        CHECK(pf == OP_PLATFORM_LINUX);
+#endif
+    }
+
     std::printf("== 2. create / 回调注册 / 初始查询\n");
     Capture cap;
     op_player *p = op_create();
@@ -274,7 +308,10 @@ int main()
         CHECK(op_play(p) == OP_ERR_NOT_READY);
         CHECK(op_pause(p) == OP_ERR_NOT_READY);
         CHECK(op_seek_ms(p, 1000) == OP_ERR_NOT_READY);
-        CHECK(op_step_frame(p, 1) == OP_ERR_NOT_READY);
+        // 移动档连"逐帧"这个能力都没有，所以是 UNSUPPORTED 而不是 NOT_READY ——
+        // 平台属性优先于"现在有没有打开文件"
+        CHECK(op_step_frame(p, 1) == (core::kFrameStepSupported ? OP_ERR_NOT_READY
+                                                               : OP_ERR_UNSUPPORTED));
         CHECK(op_set_speed(p, 10) == OP_ERR_NOT_READY);
     }
 

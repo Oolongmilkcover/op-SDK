@@ -1,7 +1,9 @@
 #include "core/packetqueue.h"
 
+#include <algorithm>
+
 PacketQueue::PacketQueue(int maxSize)
-    : m_maxSize(maxSize > 100 ? maxSize : 100)
+    : m_maxSize(std::clamp(maxSize, 1, 4096))
 {
 }
 

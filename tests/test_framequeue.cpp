@@ -304,6 +304,56 @@ int main()
         CHECK(st == FrameQueue::StepAtBegin);
     }
 
+    // ==================== 7. 移动档：8 帧 / 无历史 ====================
+    /*
+     * 移动端（core/platform.h 的 kIsMobile）用 FrameQueue(8, false)：
+     *   - 未来队列 8 帧，环形回绕必须正常；
+     *   - 历史队列整条不建：next() 不留帧、stepBackward 直接 StepAtBegin、
+     *     prependHistory 的入帧必须被丢弃（否则就是内存泄漏）；
+     *   - onNeedRefill 永不触发（关历史后回填没有任何意义）。
+     *
+     * 这一节和平台无关，在桌面上也照跑：移动档能否成立不该靠"上真机看一眼"。
+     */
+    {
+        printf("== 7. mobile profile (8 frames, no history)\n");
+        FrameQueue q(8, false);
+        int refillCnt = 0;
+        q.onNeedRefill = [&](long long) { ++refillCnt; };
+
+        for (int i = 0; i < 8; ++i) produce(q, 1000 + i * 40);
+        CHECK(q.size() == 8);
+
+        playOne(q);
+        CHECK(q.size() == 7);
+        CHECK(q.historySize() == 0);      // 消费过的帧不进历史
+        CHECK(q.currentPts() == -1);      // 没有光标
+        CHECK(q.cursorAtNewest());        // "停在最新帧"= true（没有历史可退）
+
+        // 回绕：读指针在 1、写指针绕回 0，这时入队必须还能成功
+        produce(q, 1320);
+        CHECK(q.size() == 8);
+
+        FrameQueue::StepStatus st = FrameQueue::StepEmpty;
+        CHECK(stepBack(q, &st) == -1);
+        CHECK(st == FrameQueue::StepAtBegin);
+        CHECK(refillCnt == 0);            // 不会去请求回填
+
+        CHECK(stepFwd(q) == 1040);        // 仍能从未来队列取
+        CHECK(q.size() == 7);
+
+        // 回填接口在 no-history 档下必须丢弃入帧（不能悄悄留在 deque 里）
+        std::deque<AVFrame*> batch;
+        for (int i = 0; i < 3; ++i) batch.push_back(makeFrame(i * 10));
+        q.prependHistory(batch, 2);
+        CHECK(batch.empty());
+        CHECK(q.historySize() == 0);
+        CHECK(q.refillPending() == false);
+
+        q.clear();
+        CHECK(q.size() == 0);
+        CHECK(q.historySize() == 0);
+    }
+
     if (g_fail == 0) { printf("\nALL TESTS PASSED\n"); return 0; }
     printf("\n%d CHECK(S) FAILED\n", g_fail);
     return 1;

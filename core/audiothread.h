@@ -3,6 +3,7 @@
 
 #include "core/decodethread.h"
 #include "core/iaudiooutput.h"
+#include "core/platform.h"
 #include <thread>
 #include <atomic>
 #include <mutex>
@@ -13,7 +14,9 @@ struct AVFilterContext;
 class AudioThread :public DecodeThread
 {
 public:
-    explicit AudioThread(int frameQueSizeize = 100 , bool keep_last = false);
+    // 音频没有历史队列（keep_last 恒 false）；帧队列 16 帧 ≈ 64KB，见 core/platform.h
+    explicit AudioThread(int frameQueSize = core::kAudioFrameQueueSize,
+                         bool keep_last = false);
     ~AudioThread();
 
     // 初始化音频

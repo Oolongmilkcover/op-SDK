@@ -36,6 +36,7 @@
 
 #include "core/log.h"
 #include "core/messagequeue.h"
+#include "core/platform.h"
 #include "core/playercore.h"
 #include "core/playercontext.h"
 #include "src/audioring.h"
@@ -44,6 +45,21 @@ extern "C" {
 #include <libavutil/frame.h>
 #include <libavutil/imgutils.h>
 }
+
+/*
+ * 两套枚举值必须一一对应：op_platform() 是直接 static_cast 过去的，
+ * 少一条就等于壳看到的平台和内核用的档位不是同一个东西。
+ */
+static_assert(static_cast<int>(core::Platform::Unknown)   == OP_PLATFORM_UNKNOWN,
+              "Platform::Unknown 必须等于 OP_PLATFORM_UNKNOWN");
+static_assert(static_cast<int>(core::Platform::Windows)   == OP_PLATFORM_WINDOWS,
+              "Platform::Windows 必须等于 OP_PLATFORM_WINDOWS");
+static_assert(static_cast<int>(core::Platform::Linux)     == OP_PLATFORM_LINUX,
+              "Platform::Linux 必须等于 OP_PLATFORM_LINUX");
+static_assert(static_cast<int>(core::Platform::Android)   == OP_PLATFORM_ANDROID,
+              "Platform::Android 必须等于 OP_PLATFORM_ANDROID");
+static_assert(static_cast<int>(core::Platform::HarmonyOS) == OP_PLATFORM_HARMONYOS,
+              "Platform::HarmonyOS 必须等于 OP_PLATFORM_HARMONYOS");
 
 namespace
 {
@@ -465,6 +481,18 @@ OP_API op_player *op_create(void)
         refreshSinkLocked();   // 表变了，重算一次（不会装，因为这时还没有回调）
     }
 
+    /*
+     * 打一行档位：真机上不用连调试器就能确认"内核到底按哪档在跑"。
+     * 这一行发生在 op_set_log_cb 之前，所以走 stderr（鸿蒙 hilog 里看得到）——
+     * 档位判错时（比如鸿蒙被当成桌面 Linux）这是第一眼能看到的证据。
+     */
+    logInfo() << "[op_sdk] platform=" << core::platformName(core::kPlatform)
+              << " mobile=" << (core::kIsMobile ? 1 : 0)
+              << " frameQueue=" << core::kVideoFrameQueueSize
+              << " history=" << (core::kKeepFrameHistory ? "on" : "off")
+              << " step=" << (core::kFrameStepSupported ? "on" : "off")
+              << " pktQueue=" << core::kVideoPacketQueueSize;
+
     return p;
 }
 
@@ -501,6 +529,17 @@ OP_API op_result op_version(int32_t *major, int32_t *minor)
     if (major) *major = OP_API_VERSION_MAJOR;
     if (minor) *minor = OP_API_VERSION_MINOR;
     return OP_OK;
+}
+
+OP_API int32_t op_platform(void)
+{
+    // 编译期就定了（core/platform.h），运行时没有任何判断，也不用加锁
+    return static_cast<int32_t>(core::kPlatform);
+}
+
+OP_API int32_t op_is_mobile(void)
+{
+    return core::kIsMobile ? 1 : 0;
 }
 
 OP_API op_result op_set_event_cb(op_player *p, op_event_cb cb, void *user)
@@ -641,6 +680,14 @@ OP_API op_result op_step_frame(op_player *p, int32_t dir)
 {
     if (!p) return OP_ERR_INVALID_ARG;
     if (dir != 1 && dir != -1) return OP_ERR_INVALID_ARG;
+    /*
+     * 移动档没有历史队列，逐帧整条关闭（见 core/platform.h）。
+     *
+     * 放在 isReady 之前："这台设备根本不支持逐帧"比"现在没 open"更根本 ——
+     * 壳如果漏了 op_is_mobile() 的提前判断，拿到的也是明确的 UNSUPPORTED，
+     * 而不是一会儿 NOT_READY 一会儿能用的假象。
+     */
+    if (!core::kFrameStepSupported) return OP_ERR_UNSUPPORTED;
     if (!isReady(p)) return OP_ERR_NOT_READY;
     // 纯音频没有"帧位置"，直播流的位置也不由客户端决定 —— 都别受理
     if (!p->hasVideo.load() || p->isStream.load()) return OP_ERR_UNSUPPORTED;
