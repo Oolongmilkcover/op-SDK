@@ -79,12 +79,12 @@ public:
     // 测试注入时钟（单调毫秒）。必须在 open() 之前设置。
     using ClockFn = std::function<int64_t()>;
 
-    // 环容量：按 300ms 算，够吸收抖动；再大只会增加延迟
-    static constexpr int     kCapacityMs         = 300;
+    // 环容量：按 120ms 算，够吸收解码抖动；再大只会增加 seek 后的"旧音频尾巴"
+    static constexpr int     kCapacityMs         = 120;
     // 上报值的上限（夹紧用）：正常设备积压不会超过这个量级，超了就是壳算错了
     static constexpr int32_t kMaxDevicePendingMs = 2000;
 
-    explicit AudioRingSink(int capacityBytes = 0); // 0 = 按 open() 的采样率算 300ms
+    explicit AudioRingSink(int capacityBytes = 0); // 0 = 按 open() 的采样率算 120ms
     ~AudioRingSink();
 
     void setClock(ClockFn fn);

@@ -579,6 +579,12 @@ void Player::postSeek(long long targetMs)
     m_canSeek        = false;
     m_canSeekUntilMs = QDateTime::currentMSecsSinceEpoch() + kSeekLockTimeoutMs;
     op_seek_ms(m_ctx.player,targetMs);
+    /*
+     * 声卡里还压着 seek 之前的 PCM（设备缓冲 ~85ms）。不清的话，seek 完成后
+     * 会先响一段旧位置的声音再跳到新位置 —— 听感就是"seek 延迟很高"。
+     * 这里立刻把设备缓冲丢掉；新位置的 PCM 由 core 在 ~几 ms 内重新填进来。
+     */
+    if (m_auPlayer && m_auPlayer->isOpen()) m_auPlayer->clear();
 }
 
 

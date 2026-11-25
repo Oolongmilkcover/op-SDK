@@ -118,7 +118,7 @@ int main()
     /* ================= 4. Sink: 单位换算 ================= */
     std::printf("== 4. Sink: ring 字节 → 毫秒\n");
     {
-        AudioRingSink sink;                       // 容量 0 = 按 open 的采样率算 300ms
+        AudioRingSink sink;                       // 容量 0 = 按 open 的采样率自动算
         sink.setClock(&testClock);
         g_now = 10000;
         CHECK(sink.open(48000, 2));
@@ -131,8 +131,15 @@ int main()
         CHECK(sink.availableBytes() == 19200);
         CHECK(sink.getNoPlayMs() == 100);         // 设备积压为 0，只算 ring
 
-        // 300ms @48k/2ch = 57600 → 向上取整 65536
-        CHECK(sink.getFree() == 65536 - 19200);
+        /*
+         * 容量按 kCapacityMs 自动算并向上取整到 2 的幂。
+         * 这里**不要写死字节数**：容量是调延迟用的参数，写死之后每次调整都要改测试
+         * （而且这台机器的增量构建不跟踪头文件，很容易"测试过了但跑的是旧对象"）。
+         */
+        int expectedCap = 1;
+        while (expectedCap < 48000 * 2 * 2 * AudioRingSink::kCapacityMs / 1000)
+            expectedCap <<= 1;
+        CHECK(sink.getFree() == expectedCap - 19200);
 
         std::vector<uint8_t> out(1920);           // 10ms
         CHECK(sink.read(out.data(), 1920) == 1920);

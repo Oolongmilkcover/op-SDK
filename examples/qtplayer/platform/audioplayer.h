@@ -43,7 +43,6 @@ public:
     void close();
 
     bool isOpen() const { return m_sink != nullptr; }
-
     void clear();                 // 丢弃设备里还没播的数据（seek / 停止）
     void setPause(bool isPause);  // suspend / resume
     long long getNoPlayMs();      // 设备里已写未播的毫秒数
@@ -63,6 +62,7 @@ private:
 
     std::mutex        m_mutex;       // 保护 m_sink/m_io/clear
     std::atomic<bool> m_isPaused{false};
+    std::atomic<bool> m_logNextWrite{false};   // 调试：clear 之后第一次写 PCM 打时间戳
     op_player*        m_player = nullptr;
     qreal             m_savedVolume = 0.5;
 

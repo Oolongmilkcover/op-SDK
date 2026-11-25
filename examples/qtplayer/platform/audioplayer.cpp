@@ -51,6 +51,13 @@ bool AudioPlayer::open(int sampleRate, int channels, op_player* player)
 
     m_sink = new QAudioSink(dev, fmt);
     m_sink->setVolume(m_savedVolume);
+    /*
+     * 设备缓冲默认约 250ms（48000 字节 @48k/2ch/16bit），seek 时这段**旧音频**
+     * 会先播完才轮到新位置，听感就是"seek 延迟将近半秒"。
+     * 压到 ~85ms（16384 字节）：够吸收解码抖动，又不至于让 seek 后拖一条长尾巴。
+     * 后端可能夹紧这个值，实际大小看下一行日志。
+     */
+    m_sink->setBufferSize(16384);
     m_io = m_sink->start();          // 推模式：返回给我们写的 QIODevice
     if (!m_io) {
         qDebug() << "QAudioSink::start 失败:" << m_sink->error();
@@ -98,6 +105,8 @@ void AudioPlayer::pump()
             logged = true;
             qDebug() << "[Audio] first PCM write" << got << "bytes";
         }
+        if (m_logNextWrite.exchange(false) && !qgetenv("OP_QT_SEEK_MS").isEmpty())
+            qDebug() << "[pump] first write after clear" << got;
     }
 
     static int dbg = 0;
@@ -150,10 +159,14 @@ void AudioPlayer::clear()
         return;
     }
 
-    std::vector<char> silence(8192, 0);
+    // reset 之后设备是停的，先喂一点点静音把它叫醒；不要多喂 ——
+    // 这段静音会排在新 PCM 前面，直接变成 seek 的额外延迟（8192 字节约 42ms）。
+    std::vector<char> silence(2048, 0);
     m_io->write(silence.data(), (qint64)silence.size());
 
     if (wasPaused) m_sink->suspend();
+
+    m_logNextWrite.store(true);
 }
 
 void AudioPlayer::setPause(bool isPause)

@@ -118,7 +118,7 @@ AudioRingSink::AudioRingSink(int capacityBytes)
           return (int64_t)duration_cast<milliseconds>(steady_clock::now() - origin).count();
       })
 {
-    m_capacityBytes.store(capacityBytes);   // 0 = 由 open() 按采样率算 300ms
+    m_capacityBytes.store(capacityBytes);   // 0 = 由 open() 按采样率自动算 kCapacityMs
     m_lastClearMs.store(nowMs(), std::memory_order_relaxed);
     m_devStampMs.store(nowMs(), std::memory_order_relaxed);
 }
@@ -150,7 +150,7 @@ bool AudioRingSink::open(int sampleRate, int channels)
     const int frame = channels * 2;          // S16 交错：一帧 = 声道数 × 2 字节
 
     int cap = m_capacityBytes.load(std::memory_order_relaxed);
-    if (cap <= 0)                            // 没指定就按 300ms 算
+    if (cap <= 0)                            // 没指定就按 kCapacityMs 算
         cap = (int)((int64_t)sampleRate * frame * kCapacityMs / 1000);
 
     {

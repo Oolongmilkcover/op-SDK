@@ -159,7 +159,7 @@ std::function<void(AVFrame*)> videoCB(op_video_cb cb, void* user_data) {
 struct op_player
 {
     PlayerContext ctx;
-    AudioRingSink sink;   // 默认 300ms 环形缓冲；core 通过 IAudioOutput* 往里写
+    AudioRingSink sink;   // 默认 120ms 环形缓冲；core 通过 IAudioOutput* 往里写
     PlayerCore    core;
     /* ------------------------------------------------------------------
      * 最近已知状态（T2）
