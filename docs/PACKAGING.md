@@ -38,7 +38,7 @@ ctest --test-dir build-shared --output-on-failure     # 5/5
 cmake --install build-shared --prefix dist
 ```
 
-Linux / 鸿蒙 / 安卓同样是 `-DOP_BUILD_SHARED=ON`，产物是 `libop_sdk.so.0.1.0`（带 SONAME）。
+Linux / 鸿蒙 / 安卓同样是 `-DOP_BUILD_SHARED=ON`，产物是 `libop_sdk.so.1.0.0`（带 SONAME）。
 
 默认（不传 `OP_BUILD_SHARED`）仍然是**静态库**，行为和以前完全一致，
 方便单测和上游 Qt 播放器直接 `add_subdirectory`。
@@ -142,8 +142,8 @@ cc app.c -I dist/include -L dist/lib -lop_sdk -Wl,-rpath,'$ORIGIN/lib'
 
 ## 6. 版本与 ABI
 
-- `op_version(&major,&minor)` 返回接口版本（当前 0.1），和 `OP_API_VERSION_*` 宏一致；
-- DLL/SO 文件名带 `PROJECT_VERSION`（0.1.0），Linux 的 SONAME 是 `libop_sdk.so.0`；
+- `op_version(&major,&minor)` 返回接口版本（当前 1.0），和 `OP_API_VERSION_*` 宏一致；
+- DLL/SO 文件名带 `PROJECT_VERSION`（1.0.0），Linux 的 SONAME 是 `libop_sdk.so.1`；
 - 只要**不删字段、不改已有函数签名**，加函数/加结构体尾部字段都是兼容的；
 - `op_frame` / `op_event` 是扁平结构体，调用方按值读，跨编译器也能用；
 - **不要**把 C++ 类型加进这个头文件（`std::string`、`bool`、异常），那会立刻毁掉 ABI。

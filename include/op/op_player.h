@@ -59,8 +59,8 @@ extern "C" {
 #endif
 
 /* --------------------------------------------------------------- 版本号 */
-#define OP_API_VERSION_MAJOR 0
-#define OP_API_VERSION_MINOR 1
+#define OP_API_VERSION_MAJOR 1
+#define OP_API_VERSION_MINOR 0
 
 //唯一支持的格式
 #define OP_PIX_FMT_YUV420P 0

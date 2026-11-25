@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.21)
 
 project(op-sdk
-    VERSION 0.1.0
+    VERSION 1.0.0
     DESCRIPTION "Qt-free playback core, packaged as a reusable SDK"
     LANGUAGES CXX
 )
@@ -109,7 +109,7 @@ if(OP_BUILD_SHARED)
         # Linux：只导出标了 visibility("default") 的 OP_API，其余符号隐藏
         CXX_VISIBILITY_PRESET hidden
         VISIBILITY_INLINES_HIDDEN ON
-        # 文件名带版本：libop_sdk.so.0.1.0 / libop_sdk.so.0（Windows 只有 op_sdk.dll）
+        # 文件名带版本：libop_sdk.so.1.0.0 / libop_sdk.so.1（Windows 只有 op_sdk.dll）
         VERSION ${PROJECT_VERSION}
         SOVERSION ${PROJECT_VERSION_MAJOR}
         # Windows 上不要给 DLL 加 "lib" 前缀，调用方链接 op_sdk.lib
