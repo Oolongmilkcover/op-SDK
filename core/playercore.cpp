@@ -140,9 +140,9 @@ void PlayerCore::setMessageHandler()
                 // arg1=时长ms, arg2=(宽<<16)|高
             case EVT_POSITION:
                 // arg1=当前播放位置ms（100~200ms 一次，别每帧发）
-            case EVT_DISABLEBTN:
+            //case EVT_DISABLEBTN:
                 //关闭按钮
-            case EVT_ABLEBTN:
+            //case EVT_ABLEBTN:
                 //开启按钮
             case EVT_SEEK_DONE:
                 // arg1=实际落点ms（seek 可能不精确，要对齐关键帧）

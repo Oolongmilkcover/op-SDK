@@ -3,22 +3,6 @@
  *  op_player.h —— 播放内核的 C 接口（唯一对外面）
  * ============================================================================
  *
- *  这份头文件放这里是给新仓库（SDK）当起点的：QtPlayer 自己**不编译、不链接**它。
- *
- *  【实现状态 · 2026-11-23】**T1 / T2 / T4 / T5 已实现；T3 链路已通，缺 console 示例**。
- *  已能用：create / destroy / version / 回调注册（事件 / 视频帧 / 日志）/ open（路径或 fd）/
- *  play / pause / stop / seek / step / speed、EVT_* → op_event 的映射与状态缓存
- *  （op_state_of / position_ms / duration_ms / has_video / has_audio / is_music / is_stream）、
- *  以及拉模式的音频（op_audio_read / pending / latency_ms）。
- *  下面每段的标题标了它属于哪个任务、现在是什么状态：
- *
- *      T1 骨架        create / destroy / version / 回调 / 播放控制    已实现
- *      T1+ 日志       op_set_log_cb ← core::setLogSink（进程级广播）  已实现
- *      T2 事件        EVT_* → op_event + 状态缓存 + 查询              已实现
- *      T3 视频帧      op_video_cb + op_frame（紧凑缓冲视图）           已连通，缺示例
- *      T4 音频 pull   op_audio_read / pending / latency_ms          已实现
- *      T5 fd 打开     op_open_options.fd（自定义 AVIO）                已实现
- *
  *  为什么是 C 而不是 C++：
  *    鸿蒙只能经 NAPI 调 C 函数、安卓要走 JNI，C++ 对象（std::function / 虚表 /
  *    std::atomic）过不了这些边界；而且 C 接口才有 ABI 可言（同一份 .dll/.so
@@ -127,9 +111,6 @@ typedef enum op_event_type
  */
 typedef struct op_event
 {
-    int32_t     type;           /* op_event_type */
-    int32_t     state;          /* OP_EVENT_STATE */
-    int32_t     code;           /* OP_EVENT_ERROR：op_result 或 FFmpeg 错误码 */
 
     /*
      * **点事件**必须带出现在事件里的数值，不能靠回调里再去查询：
@@ -144,8 +125,10 @@ typedef struct op_event
      * 用 op_get_width / op_get_height / op_duration_ms / op_has_video ... 查询即可：
      * 它们在一次打开期间不变，什么时候读都一样。
      */
+    int32_t     type;           /* op_event_type */
+    int32_t     state;          /* OP_EVENT_STATE */
+    int32_t     code;           /* OP_EVENT_ERROR：op_result 或 FFmpeg 错误码 */
     int64_t     position_ms;
-
     const char *message;        /* 错误文本，**只在回调期间有效**，不归调用方释放 */
 } op_event;
 
@@ -253,7 +236,7 @@ typedef struct op_open_options
 } op_open_options;
 
 /* ================================================================== */
-/*  生命周期                                    状态：已实现（T1 骨架）   */
+/*  生命周期                                       */
 /*                                                                    */
 /*  线程约定（很重要）：                                                */
 /*   - op_create / op_destroy：在调用方的任意一个线程调用；op_destroy  */
@@ -275,50 +258,28 @@ OP_API op_result  op_set_video_cb(op_player *p, op_video_cb cb, void *user);
 OP_API op_result  op_set_log_cb  (op_player *p, op_log_cb   cb, void *user);
 
 /* ================================================================== */
-/*  打开 / 播放控制                      状态：已实现（T1/T2；fd 待 T5）   */
+/*  打开 / 播放控制                                                     */
 /* ================================================================== */
 
-/*
- * 异步打开：立刻返回 OP_OK 表示"已受理"，真正结果通过
- * OP_EVENT_OPENED 或 OP_EVENT_ERROR 通知。重复 open 会先关掉上一个。
- *
- * 实现提示（T1，别被"异步"骗了）：内核现在的 CMD_OPEN 是在 SDK 的消息循环线程里
- * 同步做 avformat_open_input 的 —— 网络流建连那几秒里，整条消息循环（连同 seek /
- * pause）都在排队。要做到"真的立刻返回"，得把 open 挪到工作线程去；
- * 在此之前，OP_OK 准确的含义是"消息进队了"。
- *
- * 打开成功后内核会马上开始推进（解码/渲染/音频线程起来），想"停在第一帧等人按播放"，
- * 要在 OPENED 回调里自己调 op_pause —— 目前没有"打开但不自启"的开关。
- */
 OP_API op_result op_open(op_player *p, const op_open_options *opt );
-
 OP_API op_result op_play (op_player *p);
 OP_API op_result op_pause(op_player *p);
 OP_API op_result op_stop (op_player *p);      /* 回到 IDLE，p 仍可复用 */
-
 OP_API op_result op_seek_ms(op_player *p, int64_t ms);
 
-/* 逐帧：dir 取 +1（下一帧）或 -1（上一帧，靠回填）。纯音频/流媒体返回 OP_ERR_UNSUPPORTED。 */
+
+/* 逐帧：dir 取 +1（下一帧）或 -1（上一帧，靠回填）。纯音频/流媒体返回 OP_ERR_UNSUPPORTED。
+ 在逐帧期间，壳的音频播放需要调用方设为静音 */
 OP_API op_result op_step_frame(op_player *p, int32_t dir);
+//退出逐帧
 OP_API op_result op_exit_frame_step(op_player *p);
 
 /* 倍速，用 ×10 的整数避免 C 接口里出现 double：5~20 表示 0.5x ~ 2.0x。 */
 OP_API op_result op_set_speed(op_player *p, int32_t speed_x10);
 
-/*
- * 音量：**故意没有这个接口**（2026-11-21 定，交给壳）。
- *
- * 音频是 pull 的，PCM 已经读走了。SDK 内部再存一份音量，就会和平台设备自己的音量
- * 叠乘（系统音量 20% × SDK 的 50% = 实际 10%），用户看到的是"调了没反应"或者
- * "怎么突然这么小声"，而且调音量的曲线该由壳决定，SDK 猜不准。
- *
- * 壳侧要做的事：对 op_audio_read 拿到的 S16 交错样本做一次缩放即可；
- * 如果直接用平台播放器（QAudioSink / AudioRenderer / AudioTrack）的音量接口，
- * 连缩放都不用。
- */
 
 /* ================================================================== */
-/*  音频：**拉模式**                             状态：已实现（T4）      */
+/*  音频：**拉模式**                                   */
 /*                                                                    */
 /*  调用方在自己的音频线程里循环 op_audio_read()，把拿到的 PCM 写进     */
 /*  平台的 AudioRenderer / AudioTrack。返回 0 表示暂时没数据（别忙转，   */
@@ -336,7 +297,7 @@ OP_API op_result op_set_speed(op_player *p, int32_t speed_x10);
 OP_API op_result op_set_audio_format(op_player *p, int32_t sample_rate, int32_t channels);
 
 /*
- * 壳回传"已经读走、但设备里还没播出去"的毫秒数（B 方案的关键）。
+ * 壳回传"已经读走、但设备里还没播出去"的毫秒数
  *
  * 为什么需要它：`op_audio_latency_ms()` 要算"总共还压着多少"，而积压同时躺在两处 ——
  * SDK 的环形缓冲里（自己知道）+ 设备缓冲里（只有壳知道）。不报这一项，音频时钟
@@ -365,7 +326,7 @@ OP_API int32_t   op_audio_pending(op_player *p);
 OP_API int64_t   op_audio_latency_ms(op_player *p);
 
 /* ================================================================== */
-/*  查询（线程安全，任意线程可调）             状态：已实现（T2 缓存）   */
+/*  查询（线程安全，任意线程可调）                                        */
 /* ================================================================== */
 
 OP_API int64_t   op_position_ms(op_player *p);

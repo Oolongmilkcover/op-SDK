@@ -425,12 +425,6 @@ void onCoreMessage(op_player *p, PlayerMessage &msg)
     }
 
     default:
-        /*
-         * EVT_DISABLEBTN / EVT_CLEARSCREEN / EVT_PLAYNEXT 是上游 Qt 播放器的 UI 动作
-         * （禁按钮 / 清屏 / 播下一集），SDK 里没有这些概念，一律丢掉。
-         * 状态事件不在这里：内核不发它（EVT_STATE_CHANGED 已从枚举里删掉），
-         * 由门面自己合成。
-         */
         return;
     }
 }
@@ -678,7 +672,7 @@ OP_API op_result op_set_speed(op_player *p, int32_t speed_x10)
 }
 
 /* ================================================================== */
-/*  音频：拉模式（T4，仍是桩）                                          */
+/*  音频：拉模式                                                       */
 /* ================================================================== */
 
 OP_API op_result op_set_audio_format(op_player *p, int32_t sample_rate, int32_t channels)

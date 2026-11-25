@@ -305,6 +305,7 @@ void Player::on_openLink()
         playFile(url);
     } else {
         QMessageBox::warning(this, "错误", "不支持的链接格式，请使用 RTMP/HTTP/HTTPS。");
+        m_widget->clearScreen();
     }
 }
 
@@ -831,6 +832,7 @@ void Player::onEVT_ERROR(const op_event *ev)
     }
     QMetaObject::invokeMethod(this,[this,wrong](){
         QMessageBox::warning(this, "错误", wrong);
+        m_widget->clearScreen();
     },Qt::QueuedConnection);
 }
 

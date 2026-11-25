@@ -551,7 +551,7 @@ bool DemuxThread::requestSeekMs(long long ms)
     //     不是用户意图 —— 于是 seek 结束后播放器卡在暂停，长按快进/快退后要按两次播放键；
     //  2) doSeek 用“开头快照”恢复，会丢掉 seek 期间用户按下的播放/暂停。
     //现在改成：doSeek 结尾直接读 m_isPause（同步、只由 setPause 写），上述两个问题都没了。
-    m_msgQue->push(std::move(m_msgQue->getMsg(PlayerEvent::EVT_DISABLEBTN)));
+    //m_msgQue->push(std::move(m_msgQue->getMsg(PlayerEvent::EVT_DISABLEBTN)));
     //m_isSeeking = true;
     m_msgQue->push(std::move(m_msgQue->getMsg(ContextChange::CTX_IS_SEEKING,1)));
     return true;
@@ -641,7 +641,7 @@ void DemuxThread::close()
     m_hasVideo = false;
     m_hasAudio = false;
     pts = 0;
-    m_msgQue->push(std::move(m_msgQue->getMsg(PlayerEvent::EVT_CLEARSCREEN)));
+    //m_msgQue->push(std::move(m_msgQue->getMsg(PlayerEvent::EVT_CLEARSCREEN)));
 }
 
 void DemuxThread::clear()

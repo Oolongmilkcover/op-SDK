@@ -24,21 +24,12 @@ enum PlayerCmd {
 };
 
 //Core->UI
-/*
- * EVT_STATE_CHANGED 已删除（2026-11-21）：内核从来没发过它。
- * SDK 对外要报的 IDLE / OPENING / PLAYING / ... 由门面（op_player）自己合成并缓存，
- * 内核不该再维护第二份"我现在是什么状态"—— 两份状态互相覆盖，正是上游那五个
- * 状态 bug 的来源。
- *
- * 注意：删中间一条会让后面的值整体前移（隐式递增）。收发两端都按名字用，
- * 值也不跨进程持久化，所以不影响；但别在别处存裸数字，否则以后再加删会静默错位。
- */
 enum PlayerEvent {
     EVT_PREPARED     = 100,            // arg1=时长ms, arg2=(宽<<16)|高
     EVT_POSITION,                      // arg1=当前播放位置ms（100~200ms 一次，别每帧发）
-    EVT_CLEARSCREEN,                   // 清屏
-    EVT_DISABLEBTN,                    //关闭按钮
-    EVT_ABLEBTN,                       //开启按钮
+    //EVT_CLEARSCREEN,                   // 清屏
+    //EVT_DISABLEBTN,                    //关闭按钮
+    //EVT_ABLEBTN,                       //开启按钮
     EVT_SEEK_DONE,                     // arg1=实际落点ms（seek 可能不精确，要对齐关键帧）
     EVT_BUFFERING,                     // arg1=1 开始缓冲 / 0 结束（网络流才有意义）
     EVT_COMPLETED,                     // 播到文件尾
@@ -46,10 +37,6 @@ enum PlayerEvent {
 };
 
 //DemuxThread -> PlayerCore
-/*
- * 播放列表相关的 CTX_HAS_PLAYLIST 已删除（2026-11-25）：core 不再关心"有没有下一集"。
- * 播完只发 EVT_COMPLETED，由壳决定重播还是 op_open 下一个文件。
- */
 enum ContextChange{
     CTX_IS_EXIT       = 200,            //arg1 = true/false   1/0
     CTX_IS_PAUSE,                       //arg1 = 1/0
