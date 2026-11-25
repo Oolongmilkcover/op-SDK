@@ -150,7 +150,66 @@ cc app.c -I dist/include -L dist/lib -lop_sdk -Wl,-rpath,'$ORIGIN/lib'
 
 ---
 
-## 7. 常见问题
+## 7. 多平台产物
+
+同一次 `v1.0` 发布按平台出不同资产，调用方按自己的平台取一个即可：
+
+| 平台 | 资产 | 库文件 |
+|---|---|---|
+| Windows x64 | `op-sdk-1.0.0-win64.zip` | `bin/op_sdk.dll` + `av*.dll` |
+| Linux x64 | `op-sdk-1.0.0-linux-x64.tar.gz` | `lib/libop_sdk.so*` + `libav*.so*` |
+| HarmonyOS arm64 | `op-sdk-1.0.0-ohos-arm64.zip` | `lib/libop_sdk.so` + `libav*.so` + `libc++_shared.so` |
+| Android arm64 | `op-sdk-1.0.0-android-arm64.zip` | `lib/libop_sdk.so` + `libav*.so` + `libc++_shared.so` |
+
+### 7.1 Linux x64
+
+```bash
+cmake -S . -B build-linux -G Ninja -DCMAKE_BUILD_TYPE=Release \
+      -DOP_BUILD_SHARED=ON -DFFMPEG_ROOT=/path/to/ffmpeg-linux-shared
+cmake --build build-linux && ctest --test-dir build-linux --output-on-failure
+cmake --install build-linux --prefix dist-linux
+```
+
+`libop_sdk.so` 的 `RUNPATH` 是 `$ORIGIN`，所以 FFmpeg 的 `.so` 只要和它放同一目录，
+调用方**不用**设 `LD_LIBRARY_PATH`。
+
+### 7.2 HarmonyOS arm64
+
+```powershell
+$env:OHOS_NDK = "D:/ohos-sdk/default/openharmony/native"
+cmake -S . -B build-ohos -G Ninja `
+      -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/ohos-arm64.cmake `
+      -DFFMPEG_ROOT=D:/deps/ffmpeg-ohos-shared `
+      -DOP_BUILD_SHARED=ON -DOP_PLAIN_SO=ON -DOP_BUILD_TESTS=OFF
+cmake --build build-ohos
+```
+
+- `-DOP_PLAIN_SO=ON`：产物就叫 `libop_sdk.so`（不带 `.so.1`），har 里按原名加载；
+- FFmpeg 必须用**同一套 ohos clang + sysroot** 编（`--target-os=linux --arch=aarch64`），
+  否则 musl/arm64 ABI 对不上；
+- `libc++_shared.so` 要从 NDK 一起拷进 `libs/arm64-v8a/`；
+- ArkTS 不能直接调 C 函数，需要一层很薄的 NAPI 包装 `.so`（`napi_module_register` + 方法表），
+  它链接 `libop_sdk.so`。两个 `.so` 都放 `libs/arm64-v8a/`。
+
+### 7.3 Android arm64
+
+```powershell
+$env:ANDROID_NDK = "D:/deps/android-ndk-r27c"
+cmake -S . -B build-android -G Ninja `
+      -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/android-arm64.cmake `
+      -DFFMPEG_ROOT=D:/deps/ffmpeg-android-arm64 `
+      -DOP_BUILD_SHARED=ON -DOP_PLAIN_SO=ON -DOP_BUILD_TESTS=OFF
+cmake --build build-android
+```
+
+产物直接放进 `jniLibs/arm64-v8a/`：`libop_sdk.so` + `libav*.so` + `libc++_shared.so`，
+用 JNI 包一层即可。
+
+> 交叉编译的 FFmpeg 用 `--disable-autodetect --disable-vulkan`，
+> 避免 configure 去猜主机上的库/头文件；协议（file/http/rtsp/rtmp）是 FFmpeg 内置的，不受影响。
+
+## 8. 常见问题
+
 
 | 现象 | 原因 | 处理 |
 |---|---|---|

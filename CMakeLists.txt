@@ -20,6 +20,9 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # -DOP_BUILD_SHARED=ON 时构建动态库，对外**只**导出 include/op/op_player.h 里的 op_*，
 # 调用方不再需要 FFmpeg 头文件/导入库，也不再看到 core/ 与 src/。
 option(OP_BUILD_SHARED "把 op_sdk 构建成动态库（对外只暴露 C 接口）" OFF)
+# 鸿蒙 har / 安卓 jniLibs 里一般要求库名就是 libop_sdk.so，
+# 带 SOVERSION 会变成 libop_sdk.so.1 → 加载器按原名找不到。
+option(OP_PLAIN_SO "不生成带版本号的 .so（鸿蒙/安卓打包用）" OFF)
 
 include(GNUInstallDirs)
 
@@ -108,12 +111,26 @@ if(OP_BUILD_SHARED)
     set_target_properties(op_sdk PROPERTIES
         # Linux：只导出标了 visibility("default") 的 OP_API，其余符号隐藏
         CXX_VISIBILITY_PRESET hidden
-        VISIBILITY_INLINES_HIDDEN ON
+        VISIBILITY_INLINES_HIDDEN ON)
+    if(WIN32)
+        # Windows 上不要给 DLL 加 "lib" 前缀，调用方链接 op_sdk.lib；
+        # Linux/鸿蒙/安卓要的是 libop_sdk.so，别把 lib 前缀去掉。
+        set_target_properties(op_sdk PROPERTIES PREFIX "")
+    endif()
+    if(NOT OP_PLAIN_SO)
         # 文件名带版本：libop_sdk.so.1.0.0 / libop_sdk.so.1（Windows 只有 op_sdk.dll）
-        VERSION ${PROJECT_VERSION}
-        SOVERSION ${PROJECT_VERSION_MAJOR}
-        # Windows 上不要给 DLL 加 "lib" 前缀，调用方链接 op_sdk.lib
-        PREFIX "")
+        set_target_properties(op_sdk PROPERTIES
+            VERSION ${PROJECT_VERSION}
+            SOVERSION ${PROJECT_VERSION_MAJOR})
+    endif()
+
+    # 发行包里 FFmpeg 的 .so 和 libop_sdk.so 放在同一目录：
+    # rpath 写 $ORIGIN，调用方不用设 LD_LIBRARY_PATH。
+    if(UNIX)
+        set_target_properties(op_sdk PROPERTIES
+            BUILD_RPATH "$ORIGIN"
+            INSTALL_RPATH "$ORIGIN")
+    endif()
 else()
     add_library(op_sdk STATIC ${OP_SDK_SOURCES})
     # 静态库必须把 op_core 的依赖传给调用方：它要自己链 FFmpeg
