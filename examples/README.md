@@ -61,8 +61,14 @@ cmake -S examples/qtplayer -B examples/qtplayer/build -G "MinGW Makefiles" `
 cmake --build examples/qtplayer/build -j 4
 ```
 
-产物：`QtPlayer.exe`（4~12 MB，看工具链）。
-`FFMPEG_PATH` 由主仓库的 `cmake/FFmpeg.cmake` 使用，含义和 SDK 那边一致。
+产物：`QtPlayer.exe` + **`op_sdk.dll`**（+ `av*.dll`）。
+壳现在链接的是**动态库**：`examples/qtplayer/CMakeLists.txt` 里强制
+`OP_BUILD_SHARED=ON`，`QtPlayer.exe` 的导入表里只有 `op_sdk.dll`，不直接依赖 FFmpeg；
+POST_BUILD 会把 `op_sdk.dll` 和 FFmpeg 的运行时 DLL 拷到 exe 旁边，所以双击就能跑。
+换 SDK 只要替换那个 DLL，不用重编播放器。
+
+`FFMPEG_PATH` 由主仓库的 `cmake/FFmpeg.cmake` 使用，含义和 SDK 那边一致（只在
+构建时用来找导入库；运行时用的是拷到 exe 旁边的 DLL）。
 
 **调试用的两个入口**（2026-11-25 加的）：
 
@@ -86,8 +92,8 @@ QtPlayer.exe --audiotest 最小声卡自检：只建 QAudioSink、写静音，
 
 ## 适配时要做的（把 `app/` 改成走 C 接口）
 
-1. **只依赖 `op_sdk`**：`CMakeLists.txt` 已经链了 `op_sdk`（它 PUBLIC 带着 `op_core` 和
-   `ffmpeg_deps`）。等 `app/` 不再 include `core/*.h` 之后，调用方就真正只看见 C 接口了。
+1. **只依赖 `op_sdk`**：`CMakeLists.txt` 只链 `op_sdk`（动态库），头文件统一写
+   `<op/op_player.h>`。`app/` 已经不再 include 任何 `core/*.h`，调用方真正只看见 C 接口。
 2. **`app/player.cpp` 换成 C 接口**：现在的 `CMD_OPEN` / `CMD_PAUSE` / 信号槽换成
    `op_create / op_set_event_cb / op_set_video_cb / op_open / op_play / op_pause / op_seek_ms …`。
 3. **回调要排队**：`op_event_cb` / `op_video_cb` 跑在 **SDK 的消息循环线程**上，不能直接碰 QWidget。

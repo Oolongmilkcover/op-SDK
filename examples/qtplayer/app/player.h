@@ -1,6 +1,6 @@
 #ifndef PLAYER_H
 #define PLAYER_H
-#include "include/op/op_player.h"
+#include <op/op_player.h>
 #include <QElapsedTimer>
 #include <QListWidgetItem>
 #include <QWidget>

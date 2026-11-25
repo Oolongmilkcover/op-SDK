@@ -1,5 +1,5 @@
 #pragma once
-#include "include/op/op_player.h"
+#include <op/op_player.h>
 #include <QOpenGLWidget>
 #include <QOpenGLFunctions>
 #include <QOpenGLShaderProgram>

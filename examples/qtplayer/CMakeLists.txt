@@ -40,6 +40,13 @@ find_package(Qt6 REQUIRED COMPONENTS
 # OP_BUILD_TESTS 必须先关掉：主仓库的单测目标（test_framequeue 等）和示例工程
 # 没有任何关系，而且 ctest 归主仓库管，不该在示例里再挂一遍。
 set(OP_BUILD_TESTS OFF CACHE BOOL "示例工程里不编主仓库的单测" FORCE)
+
+# 壳走**动态库**：op_sdk 编成 SHARED，壳只通过 C 接口调用，运行时只需要
+# op_sdk.dll / libop_sdk.so（+ FFmpeg 的运行时库），不再把内核静态链进 exe。
+# 这样发布壳的时候，SDK 可以单独替换（修 bug 不用重编播放器），也验证了
+# "别人只拿头文件 + 动态库"这条路径在真实消费者上可用。
+set(OP_BUILD_SHARED ON CACHE BOOL "示例工程链接动态库" FORCE)
+set(OP_PLAIN_SO OFF CACHE BOOL "桌面动态库保留带版本号的 .so" FORCE)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../.. ${CMAKE_BINARY_DIR}/op-sdk)
 
 # **顺序很重要**：qt_standard_project_setup() 会把 CMAKE_AUTOMOC/AUTOUIC 设成 ON，
@@ -90,12 +97,10 @@ qt_add_executable(QtPlayer
 # （"core/xxx.h" 由 op_core 的 PUBLIC include 解析到主仓库的 core/，这里不用管。）
 target_include_directories(QtPlayer PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
-# 链接 op_sdk：它 PUBLIC 链着 op_core（内核）和 ffmpeg_deps（FFmpeg），
-# 所以这里不用再单独写 ffmpeg_deps。
-#
-# 现状说明：app/ 目前还在直接使用 core 的 C++ 类（PlayerCore / DemuxThread / IAudioOutput…），
-# 那是"改造成 C 接口"之前的形态。等 app/ 改成只调 op_* 之后，这里链 op_sdk 依然成立，
-# 可以顺手把对 op_core 头文件的依赖删干净 —— 见 examples/README.md 的适配步骤。
+# 链接 op_sdk（动态库）：
+#   - 头文件由 op_sdk 的 INTERFACE 提供（仓库 include/），壳里统一写 <op/op_player.h>；
+#   - op_core / FFmpeg 是 op_sdk 的实现细节（PRIVATE 链接），壳不需要它们，
+#     所以这里**不再**出现 ffmpeg_deps / core 的头文件路径。
 target_link_libraries(QtPlayer PRIVATE
     op_sdk
     Qt6::Core
@@ -105,6 +110,37 @@ target_link_libraries(QtPlayer PRIVATE
     Qt6::OpenGL
     Qt6::OpenGLWidgets
 )
+
+# ============================ 动态库的部署 ============================
+# 运行时加载器只找 exe 同目录 / PATH（Linux 是 rpath + LD_LIBRARY_PATH）。
+# 这里把 op_sdk 和 FFmpeg 的运行时库拷到 exe 旁边，开发时和发布包都能直接双击运行。
+if(WIN32)
+    add_custom_command(TARGET QtPlayer POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            $<TARGET_FILE:op_sdk> $<TARGET_FILE_DIR:QtPlayer>)
+    file(GLOB _op_ffmpeg_runtime_dlls "${FFMPEG_PATH}/bin/*.dll")
+    if(_op_ffmpeg_runtime_dlls)
+        add_custom_command(TARGET QtPlayer POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                ${_op_ffmpeg_runtime_dlls} $<TARGET_FILE_DIR:QtPlayer>)
+    endif()
+elseif(UNIX AND NOT APPLE)
+    # Linux：libop_sdk.so 的 RUNPATH 是 $ORIGIN，FFmpeg 的 .so 要跟它同目录
+    add_custom_command(TARGET QtPlayer POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            $<TARGET_FILE:op_sdk> $<TARGET_FILE_DIR:QtPlayer>)
+    if(FFMPEG_ROOT)
+        file(GLOB _op_ffmpeg_runtime_sos "${FFMPEG_ROOT}/lib/lib*.so*")
+        if(_op_ffmpeg_runtime_sos)
+            add_custom_command(TARGET QtPlayer POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    ${_op_ffmpeg_runtime_sos} $<TARGET_FILE_DIR:QtPlayer>)
+        endif()
+    endif()
+    set_target_properties(QtPlayer PROPERTIES
+        BUILD_RPATH "$ORIGIN"
+        INSTALL_RPATH "$ORIGIN")
+endif()
 
 # Windows：main.cpp 里用 timeBeginPeriod/timeEndPeriod 把进程时钟分辨率抬到 1ms
 # （demux / 音频线程依赖 1ms 精度的 sleep，默认 15.625ms 会把 demux 吞吐压到 ~64 包/秒）。

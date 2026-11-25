@@ -2,7 +2,7 @@
 #define AUDIOPLAYER_H
 
 #include <QObject>
-#include "include/op/op_player.h"
+#include <op/op_player.h>
 #include <atomic>
 #include <mutex>
 #include <vector>
