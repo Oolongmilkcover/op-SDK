@@ -186,14 +186,11 @@ Player::Player(QWidget *parent)
     op_set_audio_format(m_ctx.player, 48000, 2);
 
     /*
-     * 4. 打开 Qt 音频设备并开始拉流。
-     * QAudioSink 建立后会一直在自己的音频线程里调 readData → op_audio_read，
-     * 没数据就返回 0（不忙转）。所以整场播放只需要 open 一次。
+     * 音频设备**不在这里打开**：Player 构造时 QApplication 的事件循环还没跑，
+     * QAudioSink::start() 会停在 IdleState、bufferSize 一个字节都不消耗
+     * （实测 bytesFree 永远等于 bufferSize），写进去的 PCM 全堵在设备里。
+     * 改成第一次 playFile 时再 open（那时事件循环已经在跑）。
      */
-    if (!m_auPlayer->open(48000, 2, m_ctx.player)) {
-        qDebug() << "音频设备打开失败，本次播放将没有声音";
-    }
-
 }
 
 Player::~Player()
@@ -419,13 +416,6 @@ void Player::playFile(const QString &path)
     //换文件前先退出逐帧
     exitStepFrame();
 
-    // 打开成功后 SDK 会立即开始解码；先把上一轮残留的设备缓冲丢掉，
-    // 免得"先听到上一个文件的一小段"。
-    if (m_auPlayer) {
-        m_auPlayer->clear();
-        m_auPlayer->setPause(false);
-    }
-
     op_open_options opt{};
     opt.open_timeout_ms = 15000;
     opt.fd = -1;
@@ -436,6 +426,23 @@ void Player::playFile(const QString &path)
         // 处理打开失败
         return;
     }
+
+    /*
+     * 音频设备在**第一次打开文件时**才启动：
+     * 构造函数里 QApplication 的事件循环还没跑，QAudioSink 会停在 IdleState
+     * （bytesFree 永远是满的），PCM 写进去没人消费 → 环形缓冲堵满 →
+     * 音频时钟不前进 → 视频播一下就冻住。
+     */
+    if (!qEnvironmentVariableIsSet("OP_QT_NO_AUDIO") && !m_auPlayer->isOpen()) {
+        if (!m_auPlayer->open(48000, 2, m_ctx.player))
+            qDebug() << "音频设备打开失败，本次播放将没有声音";
+    }
+    // 丢掉上一轮残留的 PCM，再恢复播放（换文件时设备里可能还压着上一个文件的一小段）
+    if (m_auPlayer->isOpen()) {
+        m_auPlayer->clear();
+        m_auPlayer->setPause(false);
+    }
+
     emit setPlayingText(path);
 
 }
@@ -708,14 +715,11 @@ void Player::onEVT_POSITION(const op_event *ev)
     double speed = 1.0*op_get_speedX10(m_ctx.player) / 10.0;
 
     /*
-     * 把"设备里还有多少毫秒没播"报回 SDK —— 这是 T4 的 B 方案：
-     * SDK 只知道自己环形缓冲里压了多少，设备那份只有壳知道。漏报的话音频时钟会超前，
-     * 视频判定"自己落后"然后疯狂丢帧。
-     * 每 150ms 报一次足够（sink 侧是"锚点 + 线性外推"，不需要报得很密）。
+     * 这里**不要**调 m_auPlayer->getNoPlayMs()：本回调跑在 SDK 的消息循环线程，
+     * 而 m_auPlayer 的泵在 GUI 线程（QTimer）里也会读写同一个 QAudioSink。
+     * QAudioSink 不是线程安全的 —— 两边同时动它，实测会偶发 0xc0000005（退出/播完时）。
+     * 设备积压由 AudioPlayer::pump() 在 GUI 线程里每 10ms 报一次，这里不需要重复。
      */
-    if (m_auPlayer) {
-        op_audio_set_device_pending_ms(m_ctx.player, (int32_t)m_auPlayer->getNoPlayMs());
-    }
 
     if (seekDebugOn()) qDebug() << "[seek] position" << ms;
     QMetaObject::invokeMethod(this,[this,ms,speed](){

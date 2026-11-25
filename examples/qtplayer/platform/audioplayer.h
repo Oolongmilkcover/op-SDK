@@ -3,28 +3,30 @@
 
 #include <QObject>
 #include "include/op/op_player.h"
-#include <mutex>
 #include <atomic>
+#include <mutex>
+#include <vector>
 
 class QAudioSink;
-class AudioIoDevice;
+class QIODevice;
+class QTimer;
 
 /*
- * Qt 侧的音频出口（pull 模式）。
+ * Qt 侧音频出口：**SDK 拉模式 → 声卡推模式** 的桥。
  *
- * 为什么不是 QThread + write：SDK 的音频是"壳来拉"（op_audio_read），
- * Qt 正好提供了同一个模型 —— 给 QAudioSink 一个 QIODevice，它在自己的音频线程里
- * 调 readData()。我们只要在 readData 里调 op_audio_read 就行：
+ *   core 解码线程 ──write()──> SDK 环形缓冲 ──op_audio_read()──> 本类
+ *        ──QIODevice::write()──> QAudioSink ──> 声卡
  *
- *   QAudioSink ──readData()──> AudioIoDevice::readData ──op_audio_read──> SDK 环形缓冲
+ * 为什么不用"给 QAudioSink 一个只读 QIODevice、让它来 readData"：
+ * 实测 Qt 6.11 的 pull 模式在 readData 返回 0（欠载）之后就不再回调了，
+ * 音频只被拉几次就彻底安静 → 环形缓冲写满 → 音频时钟不前进 → 视频冻住。
  *
- * 这样：
- *   - 不需要自己开线程，也没有"跨线程调 QAudioSink::write"的问题；
- *   - 设备要多少拉多少，天然按声卡节奏走（就是 SDK 选 pull 的原因）；
- *   - 没数据时返回 0，Qt 会等待（它自己处理欠载）。
- *
- * 时钟：AudioPlayer::getNoPlayMs() 返回"设备里已写未播"的毫秒数，
- * Player 在 POSITION 事件里把它通过 op_audio_set_device_pending_ms 报给 SDK。
+ * 为什么用 QTimer 而不是 std::thread：
+ * QAudioSink 不是线程安全的。实测在**非 GUI 线程**调 bytesFree()，
+ * 当 sink 还停在 IdleState（还没写第一批数据）时会永久阻塞 ——
+ * 工作线程卡死 → 环形缓冲堵满 → 音频时钟停 → 视频冻住。
+ * 放到 GUI 线程的定时器里，所有 QAudioSink 调用都在对象所属线程，
+ * 每 10ms 一次 memcpy + write 的开销可以忽略。
  */
 class AudioPlayer : public QObject
 {
@@ -37,30 +39,34 @@ public:
     AudioPlayer();
     ~AudioPlayer();
 
-    // 创建 QAudioSink 并开始拉流。player 必须活着（由 Player 保证先 close 再 destroy）。
-    bool open(int sampleRate, int channels, op_player* player);
+    bool open(int sampleRate, int channels, op_player* player);  // 第一次 playFile 时调
     void close();
 
-    // 丢掉设备里还没播的数据（seek / 停止时用）
-    void clear();
+    bool isOpen() const { return m_sink != nullptr; }
 
-    void setPause(bool isPause);
-
-    // 设备缓冲里还没播的毫秒数（音频时钟的延迟补偿量）
-    long long getNoPlayMs();
+    void clear();                 // 丢弃设备里还没播的数据（seek / 停止）
+    void setPause(bool isPause);  // suspend / resume
+    long long getNoPlayMs();      // 设备里已写未播的毫秒数
 
     void setPlayer(op_player* p);
 
     void   setVolume(qreal vol);
     double getVolume();
 
+private slots:
+    void pump();
+
 private:
-    QAudioSink*       m_sink = nullptr;
-    AudioIoDevice*    m_io   = nullptr;
-    std::mutex        m_mutex;
+    QAudioSink* m_sink  = nullptr;
+    QIODevice*  m_io    = nullptr;
+    QTimer*     m_timer = nullptr;
+
+    std::mutex        m_mutex;       // 保护 m_sink/m_io/clear
     std::atomic<bool> m_isPaused{false};
     op_player*        m_player = nullptr;
     qreal             m_savedVolume = 0.5;
+
+    std::vector<unsigned char> m_buf;   // pump 用的固定缓冲（32KB）
 };
 
 #endif // AUDIOPLAYER_H

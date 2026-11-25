@@ -59,8 +59,20 @@ cmake -S examples/qtplayer -B examples/qtplayer/build -G "MinGW Makefiles" `
 cmake --build examples/qtplayer/build -j 4
 ```
 
-产物：`QtPlayer.exe`（12 MB 左右）。
+产物：`QtPlayer.exe`（4~12 MB，看工具链）。
 `FFMPEG_PATH` 由主仓库的 `cmake/FFmpeg.cmake` 使用，含义和 SDK 那边一致。
+
+**调试用的两个入口**（2026-11-25 加的）：
+
+```text
+QtPlayer.exe <media>     直接打开并播放（不用点文件对话框）
+QtPlayer.exe --audiotest 最小声卡自检：只建 QAudioSink、写静音，
+                         打印 state/bufferSize/bytesFree，用来区分
+                         "Qt 音频后端坏了"还是"我们的封装有问题"
+```
+
+另外支持 `OP_QT_NO_AUDIO=1` 环境变量：完全跳过音频设备初始化。
+排查"视频卡住是不是被音频时钟拖住的"时非常有用。
 
 > 如果你之前用"自带 core 的旧版 CMakeLists"配过这个目录，**先删掉 `examples/qtplayer/build/`
 > 再重新配置** —— 源清单和 include 路径全变了，旧 cache 会指向已删除的 `core/*.cpp`。

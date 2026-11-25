@@ -1,6 +1,14 @@
 #include "app/player.h"
 
 #include <QApplication>
+#include <QAudioFormat>
+#include <QAudioSink>
+#include <QMediaDevices>
+#include <QMetaObject>
+#include <QTimer>
+#include <QString>
+#include <QDebug>
+#include <QByteArray>
 
 #ifdef _WIN32
 #  include <windows.h>
@@ -26,8 +34,16 @@
 int main(int argc, char *argv[])
 {
 #ifdef _WIN32
-    // ATTACH_PARENT_PROCESS：如果父进程（cmd / 终端）有控制台，就直接复用它
-    if (AttachConsole(ATTACH_PARENT_PROCESS)) {
+    /*
+     * 只有"stderr 还是控制台"时才把它接到父进程的控制台。
+     * 如果 stderr 已经被重定向到文件/管道（cmd 的 >log 2>&1、Qt Creator、
+     * CI 抓日志），再 AttachConsole + freopen("CONOUT$") 会把重定向抢掉，
+     * 日志跑到控制台里、文件里一片空白 —— 排查时被这个坑过。
+     */
+    const HANDLE hErr = GetStdHandle(STD_ERROR_HANDLE);
+    const DWORD  hType = (hErr == INVALID_HANDLE_VALUE || hErr == nullptr)
+                             ? FILE_TYPE_UNKNOWN : GetFileType(hErr);
+    if (hType == FILE_TYPE_CHAR && AttachConsole(ATTACH_PARENT_PROCESS)) {
         FILE* fp = nullptr;
         freopen_s(&fp, "CONOUT$", "w", stdout);
         freopen_s(&fp, "CONOUT$", "w", stderr);
@@ -53,8 +69,57 @@ int main(int argc, char *argv[])
     qputenv("QT_FORCE_STDERR_LOGGING", "1");
 
     QApplication a(argc, argv);
+
+    /*
+     * --audiotest：最小声卡自检（不经过 SDK / Player）。
+     * 用来区分"我们的封装有问题"还是"Qt 后端在这台机器上起不来"。
+     */
+    if (argc > 1 && QString::fromLocal8Bit(argv[1]) == "--audiotest") {
+        QAudioFormat fmt;
+        fmt.setSampleRate(48000);
+        fmt.setChannelCount(2);
+        fmt.setSampleFormat(QAudioFormat::Int16);
+        const QAudioDevice dev = QMediaDevices::defaultAudioOutput();
+        qDebug() << "[T] dev:" << dev.description()
+                 << "formatOk:" << dev.isFormatSupported(fmt);
+
+        auto *sink = new QAudioSink(dev, fmt);
+        QIODevice *io = sink->start();
+        qDebug() << "[T] after start: io=" << (void *)io
+                 << "state=" << sink->state()
+                 << "buf=" << sink->bufferSize()
+                 << "err=" << sink->error();
+        qDebug() << "[T] free =" << sink->bytesFree();
+
+        auto *t = new QTimer(&a);
+        QObject::connect(t, &QTimer::timeout, [&a, sink, io, t]() {
+            static int n = 0;
+            ++n;
+            QByteArray silence(8192, 0);
+            const qint64 w = io ? io->write(silence) : -1;
+            qDebug() << "[T] tick" << n << "state=" << sink->state()
+                     << "free=" << sink->bytesFree() << "wrote=" << w;
+            if (n >= 5) { t->stop(); a.quit(); }
+        });
+        t->start(200);
+        return a.exec();
+    }
+
     Player w;
     w.show();
+
+    /*
+     * 命令行直开：QtPlayer.exe <media>
+     * 调试 / 冒烟用（不用手点文件对话框）。playFile 是 private slot，
+     * 通过元对象按名字调用即可（Qt 的 slots 天生可反射）。
+     */
+    if (argc > 1) {
+        const QString path = QString::fromLocal8Bit(argv[1]);
+        QTimer::singleShot(0, &w, [&w, path]() {
+            QMetaObject::invokeMethod(&w, "playFile", Qt::DirectConnection,
+                                      Q_ARG(QString, path));
+        });
+    }
 #ifdef _WIN32
     const int rc = a.exec();
     timeEndPeriod(1);
