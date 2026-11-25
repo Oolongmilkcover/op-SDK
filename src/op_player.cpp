@@ -798,8 +798,8 @@ OP_API op_frame *op_frame_clone(const op_frame *src)
             return nullptr;
         }
         memcpy(dst->data, src->data, (size_t)src->size);
+        dst->size = src->size;      // 没拷到数据就不要留 size（否则是 size>0 但 data==null 的半残帧）
     }
-    dst->size = src->size;
     memcpy(dst->linesize, src->linesize, sizeof(dst->linesize));
     dst->width  = src->width;
     dst->height = src->height;

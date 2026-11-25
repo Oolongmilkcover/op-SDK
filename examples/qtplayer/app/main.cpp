@@ -83,25 +83,25 @@ int main(int argc, char *argv[])
         qDebug() << "[T] dev:" << dev.description()
                  << "formatOk:" << dev.isFormatSupported(fmt);
 
-        auto *sink = new QAudioSink(dev, fmt);
-        QIODevice *io = sink->start();
+        QAudioSink sink(dev, fmt);
+        QIODevice *io = sink.start();
         qDebug() << "[T] after start: io=" << (void *)io
-                 << "state=" << sink->state()
-                 << "buf=" << sink->bufferSize()
-                 << "err=" << sink->error();
-        qDebug() << "[T] free =" << sink->bytesFree();
+                 << "state=" << sink.state()
+                 << "buf=" << sink.bufferSize()
+                 << "err=" << sink.error();
+        qDebug() << "[T] free =" << sink.bytesFree();
 
-        auto *t = new QTimer(&a);
-        QObject::connect(t, &QTimer::timeout, [&a, sink, io, t]() {
+        QTimer t(&a);
+        QObject::connect(&t, &QTimer::timeout, [&a, &sink, io, &t]() {
             static int n = 0;
             ++n;
             QByteArray silence(8192, 0);
             const qint64 w = io ? io->write(silence) : -1;
-            qDebug() << "[T] tick" << n << "state=" << sink->state()
-                     << "free=" << sink->bytesFree() << "wrote=" << w;
-            if (n >= 5) { t->stop(); a.quit(); }
+            qDebug() << "[T] tick" << n << "state=" << sink.state()
+                     << "free=" << sink.bytesFree() << "wrote=" << w;
+            if (n >= 5) { t.stop(); a.quit(); }
         });
-        t->start(200);
+        t.start(200);
         return a.exec();
     }
 

@@ -245,8 +245,16 @@ AVIOContext *openFdAvio(const FdInput &in, std::string *err)
 
     // ---- 3. 把底层 fd 摆到起点 ----
     if (size >= 0) {
-        if (rawSeek(in.fd, start, SEEK_SET) < 0)
-            return fail(sysError("seek 到 fd_offset 失败"));
+        if (rawSeek(in.fd, start, SEEK_SET) < 0) {
+            /*
+             * 走到这里 pb/buffer/opaque 都已经分配好了，直接 return fail(...) 会漏掉
+             * 这一整套（探测 size 成功、真正 seek 却失败：可 seek 的 fd 上极少见，
+             * 但 NFS / 被截断的文件能遇到）。closeFdAvio 负责一起释放。
+             */
+            const std::string msg = sysError("seek 到 fd_offset 失败");
+            closeFdAvio(&pb);
+            return fail(msg);
+        }
     }
     // size < 0（管道）：不动位置，从 fd 当前所在处开始读，offset 被忽略。
 

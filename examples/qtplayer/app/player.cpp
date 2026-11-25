@@ -15,6 +15,7 @@
 #include <QInputDialog>
 #include <QDebug>
 #include <QDateTime>          // QDateTime::currentMSecsSinceEpoch：进度条"钉住"/m_canSeek 的截止时刻
+#include <memory>             // on_video 里的 FrameSlot 用 shared_ptr 防止投递丢失时泄漏
 #include "platform/audioplayer.h"
 #include "platform/videowidget.h"
 
@@ -432,14 +433,20 @@ void Player::playFile(const QString &path)
      * 构造函数里 QApplication 的事件循环还没跑，QAudioSink 会停在 IdleState
      * （bytesFree 永远是满的），PCM 写进去没人消费 → 环形缓冲堵满 →
      * 音频时钟不前进 → 视频播一下就冻住。
+     *
+     * 只有"已经在播还换文件"时才 clear（丢掉上一个文件残留的设备缓冲）；
+     * 第一次打开不要 clear —— QAudioSink::reset() 会停掉设备，白折腾一次。
      */
-    if (!qEnvironmentVariableIsSet("OP_QT_NO_AUDIO") && !m_auPlayer->isOpen()) {
+    const bool audioWasOpen = m_auPlayer->isOpen();
+
+    if (!audioWasOpen && !qEnvironmentVariableIsSet("OP_QT_NO_AUDIO")) {
         if (!m_auPlayer->open(48000, 2, m_ctx.player))
             qDebug() << "音频设备打开失败，本次播放将没有声音";
     }
-    // 丢掉上一轮残留的 PCM，再恢复播放（换文件时设备里可能还压着上一个文件的一小段）
-    if (m_auPlayer->isOpen()) {
+    if (audioWasOpen) {
         m_auPlayer->clear();
+    }
+    if (m_auPlayer->isOpen()) {
         m_auPlayer->setPause(false);
     }
 
@@ -878,7 +885,12 @@ void Player::postBlackFrame()
     memset(U, 128, uv_size);
     memset(V, 128, uv_size);
 
-    ui->video->beginPaint();        // 走既有的"最多一帧排队"名额
+    // 抢不到名额就别再 setPaint：那会把别人正在排队的那一帧顶掉，
+    // 而且 endPaint 会把别人的名额也还掉（名额计数就乱了）。
+    if (!ui->video->beginPaint()) {
+        op_frame_free(&black);
+        return;
+    }
     ui->video->setPaint(black);     // 所有权交给 widget
     ui->video->endPaint();
 }
@@ -1243,27 +1255,38 @@ void Player::on_video(void *user,const op_frame *frame)
     Player* self = ctx ? ctx->self : nullptr;
     if (!self || !frame) return;
 
-    // 回调返回后 frame 就失效，而 GUI 线程要排队才画 → 先深拷贝一份
-    op_frame* opFrame = op_frame_clone(frame);
-    if (!opFrame) return;
+    /*
+     * 回调返回后 frame 就失效，而 GUI 线程要排队才画 → 先深拷贝一份。
+     *
+     * 用 FrameSlot（RAII）持有这份拷贝：QMetaObject::invokeMethod 投递的 lambda
+     * 如果**没被执行**（控件已销毁 / 事件循环退出），Qt 会把 functor 直接析构，
+     * 里面那个裸 op_frame* 就再也没人释放了。挂在 shared_ptr 上，lambda 被丢弃时
+     * 槽位析构自动 op_frame_free —— 不再依赖"lambda 一定会跑"。
+     */
+    struct FrameSlot {
+        op_frame* f = nullptr;
+        ~FrameSlot() { if (f) op_frame_free(&f); }
+    };
 
-    //抢名额失败 = GUI 线程还没消化上一帧 → 这一帧直接丢（丢帧优于无界堆积）
-    if (!self->m_widget->beginPaint()) {
-        op_frame_free(&opFrame);
+    auto slot = std::make_shared<FrameSlot>();
+    slot->f = op_frame_clone(frame);
+    if (!slot->f) return;
+
+    //抢名额失败 = GUI 线程还没消化上一帧 → 这一帧直接丢（slot 析构负责释放）
+    if (!self->m_widget->beginPaint())
         return;
-    }
 
-    const bool posted = QMetaObject::invokeMethod(self->m_widget, [self, opFrame]() {
-        self->m_widget->setPaint(opFrame);   //接管并释放 frame（尺寸不匹配时也会释放）
-        self->m_widget->endPaint();          //归还名额：无论 setPaint 走哪条分支都要还
+    const bool posted = QMetaObject::invokeMethod(self->m_widget, [self, slot]() {
+        op_frame* raw = slot->f;
+        slot->f = nullptr;                 // 所有权转给 setPaint（存起来或释放）
+        self->m_widget->setPaint(raw);
+        self->m_widget->endPaint();        // 无论 setPaint 走哪条分支都要还名额
     }, Qt::QueuedConnection);
 
-    //投递失败（控件已销毁 / 没有事件循环）：自己收拾，否则名额会永久占死
+    //投递失败（控件已销毁 / 没有事件循环）：归还名额，slot 析构释放帧
     if (!posted) {
-        op_frame_free(&opFrame);
         self->m_widget->endPaint();
     }
-
 }
 
 void Player::on_log(void *user, int level, const char *line)
