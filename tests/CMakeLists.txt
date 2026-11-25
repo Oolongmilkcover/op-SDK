@@ -5,6 +5,23 @@
 # op_core 的 PUBLIC 依赖自动传过来，不用重复写。
 # 不创建窗口、不建 QApplication，因此 headless（CI / 无桌面虚拟机）也能直接跑。
 
+# 动态库模式（-DOP_BUILD_SHARED=ON）下，Windows 加载器只找 exe 同目录 / PATH。
+# 把 op_sdk.dll 和 FFmpeg 的运行时 DLL 拷到测试 exe 旁边，ctest 才能直接跑，
+# 不用在命令行里手改 PATH。
+function(op_deploy_runtime tgt)
+    if(WIN32 AND OP_BUILD_SHARED)
+        add_custom_command(TARGET ${tgt} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                $<TARGET_FILE:op_sdk> $<TARGET_FILE_DIR:${tgt}>)
+        file(GLOB _op_ff_runtime_dlls "${FFMPEG_PATH}/bin/*.dll")
+        if(_op_ff_runtime_dlls)
+            add_custom_command(TARGET ${tgt} POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    ${_op_ff_runtime_dlls} $<TARGET_FILE_DIR:${tgt}>)
+        endif()
+    endif()
+endfunction()
+
 add_executable(test_framequeue
     test_framequeue.cpp
 )
@@ -25,6 +42,7 @@ add_executable(test_api
 )
 
 target_link_libraries(test_api PRIVATE op_sdk)
+op_deploy_runtime(test_api)
 
 add_test(NAME api COMMAND test_api)
 
@@ -32,14 +50,22 @@ add_test(NAME api COMMAND test_api)
 set_tests_properties(api PROPERTIES TIMEOUT 30)
 
 # 环形缓冲 / 环形 sink 单测（T4 Step 1+2）：纯 C++，不碰 FFmpeg、不出声、没有媒体文件。
+#
+# 注意：它测的是 src/ 里的内部类（AudioRing/AudioRingSink），这些符号**不导出**
+# （动态库对外只有 op_*）。所以这里直接把 audioring.cpp 编进测试，链 op_core 而不是
+# op_sdk —— 否则动态库模式下会找不到 AudioRing::write 之类的符号。
 add_executable(test_audioring
     test_audioring.cpp
+    ${PROJECT_SOURCE_DIR}/src/audioring.cpp
 )
 
-target_link_libraries(test_audioring PRIVATE op_sdk)
+target_link_libraries(test_audioring PRIVATE op_core)
 
-# 它测的是 src/ 里的内部类，不是公开接口，所以单独把 src/ 加进 include 路径
-target_include_directories(test_audioring PRIVATE ${PROJECT_SOURCE_DIR}/src)
+# 它测的是 src/ 里的内部类，不是公开接口，所以单独把 src/ 和仓库根加进 include 路径
+# （动态库模式下 op_sdk 不再把源码根 PUBLIC 出去，src/audioring.h 里的 "core/..." 需要根路径）
+target_include_directories(test_audioring PRIVATE
+    ${PROJECT_SOURCE_DIR}/src
+    ${PROJECT_SOURCE_DIR})
 
 add_test(NAME audioring COMMAND test_audioring)
 
@@ -64,6 +90,7 @@ add_executable(test_seek
 )
 
 target_link_libraries(test_seek PRIVATE op_sdk)
+op_deploy_runtime(test_seek)
 
 add_test(NAME seek COMMAND test_seek)
 

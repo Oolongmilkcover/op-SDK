@@ -1,0 +1,17 @@
+@PACKAGE_INIT@
+
+# op_sdk 的 CMake 包配置。
+#
+# 调用方只需要：
+#   find_package(op_sdk CONFIG REQUIRED)
+#   target_link_libraries(app PRIVATE op::op_sdk)
+#
+# 导出目标里自带了：
+#   - 头文件路径（<prefix>/include）
+#   - 动态库模式下的 OP_USE_SHARED 定义（Windows 的 dllimport）
+#   - 库文件（<prefix>/lib/op_sdk.lib 或 libop_sdk.so）
+# 所以调用方**不需要**知道 FFmpeg、core/、src/ 的存在。
+
+include("${CMAKE_CURRENT_LIST_DIR}/op_sdkTargets.cmake")
+
+check_required_components(op_sdk)

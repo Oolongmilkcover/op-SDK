@@ -4,7 +4,9 @@
 
 ```text
 examples/
-└── qtplayer/     ← Qt 播放器壳（只放 UI/平台层，内核与门面直接用主仓库的）
+├── qtplayer/     ← Qt 播放器壳（只放 UI/平台层，内核与门面直接用主仓库的）
+└── consumer/     ← 最小调用方：只 include <op/op_player.h>，链接安装出来的 op_sdk
+                    （验证"发行包能不能被别人直接用"，纯 C，见 docs/PACKAGING.md）
 ```
 
 ## qtplayer 是什么

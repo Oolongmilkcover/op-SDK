@@ -48,6 +48,27 @@ cmake --build build && ctest --test-dir build --output-on-failure
 依赖：FFmpeg 8.x（`avformat avcodec avdevice avutil swresample swscale avfilter`）、CMake ≥ 3.21。
 **不需要 Qt。**
 
+### 打成发行库（只给调用方头文件 + 动态库）
+
+```bash
+cmake -S . -B build-shared -G Ninja -DCMAKE_BUILD_TYPE=Release \
+      -DOP_BUILD_SHARED=ON -DFFMPEG_PATH="C:/Program Files/ffmpeg/ffmpeg8.1"
+cmake --build build-shared && ctest --test-dir build-shared --output-on-failure
+cmake --install build-shared --prefix dist
+```
+
+`dist/` 里只有 `include/op/op_player.h`、`bin/op_sdk.dll`（+ FFmpeg 运行时 DLL）、
+`lib/op_sdk.lib`、`lib/cmake/op_sdk/*`。调用方：
+
+```cmake
+find_package(op_sdk CONFIG REQUIRED)
+target_link_libraries(app PRIVATE op::op_sdk)
+```
+
+不需要 FFmpeg 开发包，也看不到 `core/`、`src/`。完整说明（导出宏、符号检查、
+单文件 DLL、手工链接、常见问题）见 [docs/PACKAGING.md](docs/PACKAGING.md)，
+最小消费者见 [examples/consumer](examples/consumer)（纯 C，只 include 头文件）。
+
 ---
 
 ## 目录
