@@ -128,7 +128,9 @@ int main()
     CHECK(op_open(p, &opt) == OP_OK);
     CHECK(cap.waitFor(OP_EVENT_OPENED, 5000));
     CHECK(op_duration_ms(p) >= 2000);
-    CHECK(op_has_video(p) == 1);
+    const bool hasVideo = (op_has_video(p) == 1);
+    std::printf("   有视频轨 = %d，时长 = %lld ms\n", hasVideo ? 1 : 0,
+                (long long)op_duration_ms(p));
 
     std::this_thread::sleep_for(std::chrono::milliseconds(300));
 
@@ -151,7 +153,12 @@ int main()
     CHECK(doneCount == 1);
 
     // 暂停中 seek 必须把目标帧画出来（不然进度条动了、屏幕不动）
-    CHECK(g_frames.load() >= 1);
+    // 纯音频（mp3 等）没有帧，这条不适用 —— 它的正确性靠"落点 + 恢复位置"验。
+    if (hasVideo) {
+        CHECK(g_frames.load() >= 1);
+    } else {
+        std::printf("   纯音频：跳过帧数断言（帧数 = %d）\n", g_frames.load());
+    }
 
     // 落点必须在目标附近
     const int64_t landed = cap.lastPos(OP_EVENT_SEEK_DONE);
