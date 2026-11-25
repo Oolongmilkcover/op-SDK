@@ -55,3 +55,17 @@ add_executable(test_fdavio
 target_link_libraries(test_fdavio PRIVATE op_core)
 
 add_test(NAME fdavio COMMAND test_fdavio)
+
+# seek 回归测试（需要真实媒体）：不设 OP_SDK_TEST_MEDIA 时打印 SKIP 并返回 0，
+# 所以 ctest 里放着也不会红；本地验证用：
+#   $env:OP_SDK_TEST_MEDIA="...\test.mp4"; build\tests\test_seek.exe
+add_executable(test_seek
+    test_seek.cpp
+)
+
+target_link_libraries(test_seek PRIVATE op_sdk)
+
+add_test(NAME seek COMMAND test_seek)
+
+# 里面有几个 300~600ms 的等待，别用太紧的超时
+set_tests_properties(seek PROPERTIES TIMEOUT 60)

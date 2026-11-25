@@ -181,6 +181,7 @@ struct op_player
     std::atomic<int32_t> hasVideo{0};
     std::atomic<int32_t> hasAudio{0};
     std::atomic<int32_t> isStream{0};
+    std::atomic<int32_t> speedX10{0};
 
     op_event_cb eventCb   = nullptr;
     void       *eventUser = nullptr;
@@ -348,12 +349,6 @@ void onCoreMessage(op_player *p, PlayerMessage &msg)
 
         op_event ev{};
         ev.type        = OP_EVENT_OPENED;
-        ev.duration_ms = durMs;
-        ev.width       = w;
-        ev.height      = h;
-        ev.has_video   = hasV;
-        ev.has_audio   = hasA;
-        ev.is_stream   = p->isStream.load();
         deliver(p, ev);
 
         /*
@@ -367,13 +362,13 @@ void onCoreMessage(op_player *p, PlayerMessage &msg)
 
     case PlayerEvent::EVT_POSITION: {
         p->positionMs.store(msg.arg1);                       // 约 150ms 一次
+        p->speedX10.store((int32_t)std::lround(p->ctx.getSpeed() * 10.0));
         op_event ev{};
         ev.type        = OP_EVENT_POSITION;
-        ev.position_ms = msg.arg1;
-        ev.speedX10 = (int32_t)std::lround(p->ctx.getSpeed() * 10.0);
+        ev.position_ms = msg.arg1;   // 点事件必须带"这一刻"的位置，壳体不能过后再查
         /*
          * 注意 ×10 这一步不能省：PlayerContext 里存的是**真实倍率**（1.0 / 1.5 / 2.0），
-         * 而 op_event 的约定是 ×10 的整数（10 = 1.0x）。直接把 double 赋给 int32_t 会得到
+         * 而倍速查询的约定是 ×10 的整数（10 = 1.0x）。直接把 double 赋给 int32_t 会得到
          * 1 / 1 / 2，0.5x 还会被截成 0 —— 壳的倍速标签就全错了。
          */
         deliver(p, ev);
@@ -389,6 +384,8 @@ void onCoreMessage(op_player *p, PlayerMessage &msg)
 
         op_event ev{};
         ev.type        = OP_EVENT_SEEK_DONE;
+        // 落点必须随事件带出去：壳排队到 GUI 线程后，op_position_ms() 可能已经
+        // 被下一条 POSITION 改成播放中的位置了（之前壳把它当 duration 用，位置全错）。
         ev.position_ms = pos;
         deliver(p, ev);
         return;
@@ -418,9 +415,11 @@ void onCoreMessage(op_player *p, PlayerMessage &msg)
     }
 
     case PlayerEvent::EVT_BUFFERING: {
+        // 这里**不要**写 hasVideo：buffering 是"网络缓冲中"的瞬时状态，
+        // 和"有没有视频轨"是两码事（上一版把它写进 hasVideo，缓冲一下
+        // op_has_video 就变成假的 0/1，UI 的按钮会跟着抖）。
         op_event ev{};
         ev.type      = OP_EVENT_BUFFERING;
-        ev.has_video = msg.arg1 ? 1 : 0;                     // 该字段在这里表示 1/0
         deliver(p, ev);
         return;
     }
@@ -765,3 +764,79 @@ OP_API int32_t op_is_music(op_player *p)
 }
 
 
+
+OP_API void op_frame_free(op_frame **frame)
+{
+    if (frame == nullptr || *frame == nullptr)
+    {
+        return;
+    }
+
+    op_frame* f = *frame;
+    if (f->data != nullptr)
+    {
+        free(f->data);
+        f->data = nullptr;
+    }
+    free(f);
+    *frame = nullptr;
+}
+
+OP_API op_frame *op_frame_clone(const op_frame *src)
+{
+    if (!src) return nullptr;
+
+    op_frame* dst = (op_frame*)calloc(1, sizeof(op_frame));
+    if (!dst) return nullptr;
+
+    // size<=0 或 data 为空时只复制元数据：空帧（比如黑帧之外"只想带尺寸"的用法）
+    // 也要能 clone，否则调用方得在每个地方自己判空。
+    if (src->size > 0 && src->data) {
+        dst->data = (uint8_t*)malloc((size_t)src->size);
+        if (!dst->data) {
+            free(dst);
+            return nullptr;
+        }
+        memcpy(dst->data, src->data, (size_t)src->size);
+    }
+    dst->size = src->size;
+    memcpy(dst->linesize, src->linesize, sizeof(dst->linesize));
+    dst->width  = src->width;
+    dst->height = src->height;
+    dst->pts_ms = src->pts_ms;
+    dst->format = src->format;
+    return dst;
+}
+
+OP_API int32_t op_get_speedX10(op_player *p)
+{
+    return p ? p->speedX10.load() : 0;
+}
+
+OP_API int32_t op_get_height(op_player *p)
+{
+    return p ? p->height.load() : 0;
+}
+
+OP_API int32_t op_get_width(op_player *p)
+{
+    return p ? p->width.load() : 0;
+}
+
+OP_API op_frame *op_frame_alloc(int32_t dataSize)
+{
+    if (dataSize < 0) return nullptr;
+
+    op_frame* dst = (op_frame*)calloc(1, sizeof(op_frame));
+    if (!dst) return nullptr;
+
+    if (dataSize > 0) {
+        dst->data = (uint8_t*)malloc((size_t)dataSize);
+        if (!dst->data) {
+            free(dst);
+            return nullptr;
+        }
+        dst->size = dataSize;
+    }
+    return dst;
+}

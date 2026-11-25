@@ -78,6 +78,9 @@ extern "C" {
 #define OP_API_VERSION_MAJOR 0
 #define OP_API_VERSION_MINOR 1
 
+//唯一支持的格式
+#define OP_PIX_FMT_YUV420P 0
+
 /* --------------------------------------------------------------- 错误码 */
 typedef enum op_result
 {
@@ -127,15 +130,22 @@ typedef struct op_event
     int32_t     type;           /* op_event_type */
     int32_t     state;          /* OP_EVENT_STATE */
     int32_t     code;           /* OP_EVENT_ERROR：op_result 或 FFmpeg 错误码 */
-    int32_t     width;
-    int32_t     height;
-    int64_t     duration_ms;
+
+    /*
+     * **点事件**必须带出现在事件里的数值，不能靠回调里再去查询：
+     *   POSITION  / SEEK_DONE / COMPLETED → position_ms
+     *
+     * 为什么不能去掉它：查询接口返回的是"**此刻**的位置"，而回调往往要排队到
+     * 壳的 UI 线程（Qt 的 QueuedConnection、鸿蒙的 threadsafe function）。
+     * 等 lambda 真正执行时，POSITION 早就被下一条覆盖了；SEEK_DONE 的落点更是
+     * 一进回放就被新位置顶掉。壳拿到的会是"另一个时刻的值"。
+     *
+     * 文件级属性（width/height/duration/has_video/has_audio/is_stream）不放进事件，
+     * 用 op_get_width / op_get_height / op_duration_ms / op_has_video ... 查询即可：
+     * 它们在一次打开期间不变，什么时候读都一样。
+     */
     int64_t     position_ms;
-    int32_t     speedX10;       /* 倍速 ×10（10 = 1.0x；范围 5~20）。目前随 POSITION 事件带出，
-                                   方便壳的倍速标签跟着走 —— 别用它当"状态源"，要权威值就缓存它 */
-    int32_t     has_video;      /* OPENED：有无视频；BUFFERING：1/0 */
-    int32_t     has_audio;
-    int32_t     is_stream;      /* 网络流（RTSP/RTMP/HLS...）时为 1 */
+
     const char *message;        /* 错误文本，**只在回调期间有效**，不归调用方释放 */
 } op_event;
 
@@ -170,6 +180,26 @@ typedef struct op_frame
     int32_t        format;      /* 0 = YUV420P（本版本只有这一种） */
 } op_frame;
 
+/*
+ * 帧的内存助手（可选，不改变"回调期间借用"的契约）。
+ *
+ * 大部分壳在回调里当场上传纹理就够了；但有些平台必须跨线程交付
+ * （Qt 的 GUI 线程、鸿蒙的 JS 线程），而 op_frame 回调一返回就失效，
+ * 所以需要"克隆一份带走"。这三个函数就是为此提供的：
+ *
+ *   op_frame_alloc(dataSize)  分配一个 op_frame；dataSize>0 时同时分配 data
+ *                             （调用方自己填 linesize/宽高/内容）
+ *   op_frame_clone(src)       深拷贝一份（data 一起拷），用完必须 op_frame_free
+ *   op_frame_free(&frame)     释放 clone/alloc 出来的帧；传 nullptr 安全
+ *
+ * 只对"自己 alloc/clone 出来的帧"调用 free —— **绝不能**释放回调里那个 frame。
+ *
+ * 注意：op_frame_alloc 的 dataSize 没有默认值，C 里必须显式传（传 0 表示
+ * 只分配结构体，data 由调用方自己 malloc）。
+ */
+OP_API op_frame* op_frame_alloc(int32_t dataSize);
+OP_API op_frame* op_frame_clone(const op_frame* src);
+OP_API void      op_frame_free(op_frame** frame);
 /* --------------------------------------------------------------- 回调 */
 /* 事件回调：在 SDK 的消息循环线程上触发。禁止阻塞、禁止在回调里调 op_destroy/op_stop。 */
 typedef void (*op_event_cb)(void *user, const op_event *ev);
@@ -345,51 +375,13 @@ OP_API int32_t   op_has_video (op_player *p);
 OP_API int32_t   op_has_audio (op_player *p);
 OP_API int32_t   op_is_music  (op_player *p);
 OP_API int32_t   op_is_stream (op_player *p);
+OP_API int32_t   op_get_width (op_player *p);
+OP_API int32_t   op_get_height(op_player *p);
+OP_API int32_t   op_get_speedX10(op_player *p);
 
 #ifdef __cplusplus
 } /* extern "C" */
 #endif
 
-/* ============================================================================
- *  最小使用示例（伪代码，两种语言的形态）
- * ============================================================================
- *
- *  // ---- 桌面 / 任意 C++ 程序 ----
- *  op_player* p = op_create();
- *  op_set_event_cb(p, on_event, nullptr);
- *  op_set_video_cb(p, on_frame, nullptr);          // 回调里上传纹理
- *  op_set_audio_format(p, 48000, 2);
- *  op_open_options o = {0}; o.path = "a.mp4"; o.fd = -1;
- *  op_open(p, &o);
- *  // 音频线程：
- *  //   while (running) {
- *  //       int n = op_audio_read(p, buf, sizeof(buf));
- *  //       if (n > 0) device.write(buf, n); else sleep_ms(3);
- *  //   }
- *
- *  // ---- 鸿蒙（ArkTS + NAPI）----
- *  //   1) XComponent 拿到 OH_NativeWindow → eglCreateWindowSurface
- *  //   2) 视频回调里做三平面 glTexSubImage2D（和现在 VideoWidget::paintGL 同一套）
- *  //   3) AudioRenderer 的写回调里（JS 线程）调 op_audio_read，把 PCM 写回去
- *  //   4) 文件选择器给的 URI → fileIo.openSync 拿 fd → op_open(fd)
- *
- * ============================================================================
- *  和现有 C++ 内核的对应关系（迁出后照着接）
- * ============================================================================
- *
- *   op_create / op_destroy   →  new PlayerCore / delete PlayerCore（含 PlayerContext）
- *   op_set_event_cb          →  PlayerCore::setEventCallBack
- *   op_set_video_cb          →  DemuxThread::openFile 里的 PaintFrame 回调
- *   op_open                  →  CMD_OPEN（obj = 路径 + 回调 + IAudioOutput）
- *   op_play                  →  CMD_PAUSE(arg1=0)
- *                               （**注意**：core 里的 CMD_PLAY 是空实现，别去"补"它 ——
- *                                实际播放/暂停只有 CMD_PAUSE 一条路，arg1 表示目标状态）
- *   op_pause / op_stop       →  CMD_PAUSE(arg1=1) / CMD_STOP
- *   op_seek_ms               →  CMD_SEEK
- *   op_step_frame            →  CMD_STEP_FORWARD / CMD_STEP_BACKWARD
- *   op_set_speed             →  CMD_SET_SPEED
- *   op_audio_read            →  新增：内部 IAudioOutput 换成环形缓冲，对外拉
- *   EVT_* → op_event         需要一层映射（arg1/arg2 的打包要拆成字段）
- */
 
 #endif /* OP_PLAYER_H */

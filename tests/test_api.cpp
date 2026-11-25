@@ -55,12 +55,6 @@ struct Recorded
     int32_t     type = 0;
     int32_t     state = 0;
     int32_t     code = 0;
-    int32_t     width = 0;
-    int32_t     height = 0;
-    int32_t     has_video = 0;
-    int32_t     has_audio = 0;
-    int32_t     is_stream = 0;
-    int64_t     duration_ms = 0;
     int64_t     position_ms = 0;
     std::string message;
 };
@@ -79,12 +73,6 @@ struct Capture
         r.type        = ev->type;
         r.state       = ev->state;
         r.code        = ev->code;
-        r.width       = ev->width;
-        r.height      = ev->height;
-        r.has_video   = ev->has_video;
-        r.has_audio   = ev->has_audio;
-        r.is_stream   = ev->is_stream;
-        r.duration_ms = ev->duration_ms;
         r.position_ms = ev->position_ms;
         r.message     = ev->message ? ev->message : "";
         events.push_back(r);
@@ -398,10 +386,12 @@ int main()
                 CHECK(c2.waitFor(OP_EVENT_OPENED, 5000));
                 Recorded r;
                 CHECK(c2.find(OP_EVENT_OPENED, &r));
-                CHECK(r.has_audio == 1);
-                CHECK(r.has_video == 0);
+                // OPENED 不再携带文件级属性（壳改用查询接口），这里跟着新契约走
+                CHECK(op_has_audio(q) == 1);
+                CHECK(op_has_video(q) == 0);
                 // 1 秒的 WAV：时长必须接近 1000ms（offset 切错就会读不到 data 块）
-                CHECK(r.duration_ms >= 900 && r.duration_ms <= 1100);
+                const int64_t d = op_duration_ms(q);
+                CHECK(d >= 900 && d <= 1100);
 
                 // 顺带验 T4 的接线：open 之后音频环里应该很快就能拉到 PCM
                 bool gotPcm = false;
