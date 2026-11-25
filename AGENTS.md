@@ -37,24 +37,31 @@
 | `tests/test_api`（T1/T2 + T4/T5 端到端） | ✅ 含"打不开的文件 → ERROR → 回 IDLE"、"合成 WAV → fd + offset → OPENED → 拉到 PCM"；断言回调不在调用方线程 |
 | `tests/test_audioring`（T4） | ✅ 8 组（绕回/对齐/字节→毫秒/外推夹紧/暂停冻结/过期上报/SPSC 1MB） |
 | `tests/test_fdavio`（T5） | ✅ 7 组（offset/size/EOF/越界/幂等释放/不关调用方 fd） |
-| 对外 C 接口 | ✅ T1/T2/T4/T5 已实现（open/play/pause/stop/seek/step/speed + 事件 + 查询 + 日志 + 音频 pull + fd） |
-| 视频帧（T3） | ⚠️ 链路已通（真文件验过 320×240 / 854×480 / H.264），但**没有 console 示例落仓库** |
-| 音频 pull（T4） | ✅ 已接线（ring + sink + 门面 + 采样率贯通）；**正式验收还缺真实媒体** |
+| `tests/test_seek`（seek 回归） | ✅ 需真实媒体：设 `OP_SDK_TEST_MEDIA` 才跑，否则 SKIP（返回 0）。验"暂停 seek 恰好 1 条 SEEK_DONE + 有帧 + 落点正确 + 恢复从落点继续" |
+| 对外 C 接口 | ✅ T1/T2/T4/T5 已实现（open/play/pause/stop/seek/step/speed + 事件 + 查询 + 日志 + 音频 pull + fd + 帧 clone/alloc） |
+| 视频帧（T3） | ✅ 链路已通 + 有消费者（Qt 壳三平面上传）；帧所有权：借用视图 + `op_frame_clone` 跨线程带走 |
+| 音频 pull（T4） | ✅ 已接线（ring + sink + 门面 + 采样率贯通）；Qt 壳已在 POSITION 里回传设备积压 |
 | fd 打开（T5） | ✅ 已实现（`core/fdavio.*` 自定义 AVIO，支持 offset/size，不可 seek 降级） |
-| 消费者示例（`examples/qtplayer`） | 🚧 壳已入库（`app/` + `platform/` + `resources/`），内核与门面靠 `add_subdirectory(../..)` 复用主仓库；**Qt 适配未完成**：`app/` 还在直接用 core 的 C++ 类，没走 `op_*` |
+| 消费者示例（`examples/qtplayer`） | ✅ 已适配：`app/` 只调 `op_*`；音频改成 `QAudioSink` + 只读 `QIODevice` 拉流；播放列表由壳自己管 |
 | 鸿蒙壳 | ❌ 不存在 |
 
-**已知未解决（下一个助手请优先看这条）**：**暂停状态下 `op_seek_ms` 不重绘、落点也不生效**
-—— 实测 seek 到 1500ms 后 `frames=0`、恢复播放却从 ~120ms 继续，且一次 seek 收到**两条**
-`SEEK_DONE`。`op_seek_ms` 只投了一条 `CMD_SEEK`、拆包也对，嫌疑在 core 的
-`doSeek()` / `repaintPts()`（含早退分支也会补发 `SEEK_DONE`）。拖动进度条是这个 SDK 最核心的
-交互，这条不通，桌面壳和鸿蒙壳都会踩。
+**已修（2026-11-25，有回归测试）**：暂停中 `op_seek_ms` 不重绘、一次 seek 收到**两条** `SEEK_DONE`。
+根因是 `DemuxThread::run()` 用 `PlayerContext` 的**异步广播副本**判断"要不要 seek"——
+`doSeek()` 结尾推的 `CTX_IS_SEEKING=0` 还没被消息循环处理，循环立刻又进了一次 `doSeek()`
+（第二次把刚画的帧清掉、位置又挪一次）。现在 `m_isSeeking` / `m_seekTargetMs` 都是
+`DemuxThread` 的**本地原子量**（也顺带解决了"目标值经 CTX_SEEKMS 异步写、doSeek 可能读到上一次"）。
+`tests/test_seek.cpp` 用真实媒体验证：暂停 seek 后恰好 1 条 SEEK_DONE、≥1 帧、落点 1500±300，
+恢复播放从落点继续。**设置 `OP_SDK_TEST_MEDIA` 才会跑，否则 SKIP。**
 
-**另一条待验收**：T4 的**时钟正确性**还没用真实媒体验过（10 秒 PCM 用 `ffplay` 播、
-带音轨视频 3 秒 ≈ 60 帧）。现有单测只能证明"接线通、能拉到 PCM"，证明不了"音画同步准"。
+**播放列表已从 core 移除（2026-11-25）**：`CTX_HAS_PLAYLIST` / `EVT_PLAYNEXT` /
+`PlayerContext` 的播放列表字段 / `DemuxThread::setHasPlayList` 全部删除。
+播完只发 `EVT_COMPLETED`：流媒体停在尾帧，本地文件自动从头重播；"切下一集"由壳在
+`OP_EVENT_COMPLETED` 里自己 `op_open`。
 
-也就是说：**内核 + C 门面（T1/T2/T4/T5）都能用了；T3 差验收物，T4 差真实媒体验收，
-seek 有个真 bug**。
+**还剩的验收**：T4 的**时钟正确性**还没用真实媒体验过（10 秒 PCM 用 `ffplay` 播、
+带音轨视频 3 秒 ≈ 60 帧）。现有单测只能证明"接线通、能拉到 PCM、seek 对"，证明不了"音画同步准"。
+
+也就是说：**内核 + C 门面 + Qt 消费者都能用了；剩下的是真实媒体的音画同步验收，然后进鸿蒙。**
 
 ---
 
@@ -140,13 +147,14 @@ seek 有个真 bug**。
 - 最近已知状态缓存进 atomic；查询接口读缓存，**不读** `PlayerContext`（它慢一个消息往返）
 - `EVT_COMPLETED` 在 core 播完的两个分支里补发（以前只在枚举里、从没人发）
 
-### T3 · 视频帧 ⚠️ 链路已通，缺验收物
+### T3 · 视频帧 ✅ 已通（Qt 壳就是消费者）
 - `PaintFrame → op_video_cb`；`op_frame` 是**紧凑连续缓冲**（`data/size/linesize[4]`），
   `linesize` 用 `av_image_fill_linesizes()` 按紧凑布局重算 —— **不能抄源 AVFrame 的对齐值**
   （宽 854 时源是 864，抄过去消费方会逐行读越界）
 - 回调返回后 `av_frame_free`（core 的 painter 是把所有权交出来的）
+- 跨线程交付用 `op_frame_clone` + `op_frame_free`（Qt 壳就是先 clone 再 QueuedConnection 到 GUI 线程）
 - 已验：320×240 MPEG4、854×480（奇数宽）、640×360 H.264；`step ±1` 出帧正常
-- **缺**：`examples/console` —— 原来"存 10 帧 PPM"的验收物没有落进仓库
+- **仍缺**：无 Qt 的 `examples/console`（PPM + PCM 落盘），作为鸿蒙对照组的验收物
 
 ### T4 · 音频 pull（B 方案）✅ 已接线，待真实媒体验收
 
@@ -260,7 +268,8 @@ core/                    ← 内核：零 Qt
   framequeue.h          ←   未来环 + 历史窗口（逐帧核心）
   iaudiooutput.h        ←   音频出口接口（push）→ T4 的 ring sink 实现它
   frameconverter.h      ←   swscale 转 YUV420P（加锁）
-tests/                   ← test_framequeue / test_api / test_audioring / test_fdavio，全部进 ctest、headless
+tests/                   ← test_framequeue / test_api / test_audioring / test_fdavio / test_seek，全部进 ctest
+docs/API.md              ← **SDK 使用说明书**：怎么调、线程/所有权、音频怎么报积压、FAQ
 docs/SDK-PLAN.md         ← 分阶段计划与验收标准
 docs/NOTES.md            ← 开发笔记：为什么这么设计、踩过的坑（AudioRing / 自定义 AVIO）
 docs/AVIO.md             ← AVIO 学习笔记：概念、最小示例、缓冲行为、排查表
@@ -313,7 +322,8 @@ $c = Get-Content $p -Raw -Encoding utf8
 
 ## 11. 一句话总结给用户的 AI
 
-> 内核 + C 门面已经能用：T1/T2/T4/T5 全部实现（open/play/pause/stop/seek/step/speed、
-> 事件、日志、视频帧、音频 pull、fd 打开），MSVC 与 MinGW 双工具链 ctest 4/4。
-> 下一步：先修第 2 节那个"暂停中 seek 不重绘"的真 bug，再做 `examples/console`
-> 补齐 T3 验收物 + T4 的真实媒体验收，然后进鸿蒙壳。每步都要能编、能测、能演示。
+> 内核 + C 门面 + Qt 消费者都能用了：T1/T2/T4/T5 全部实现，`examples/qtplayer` 已只调 `op_*`，
+> "暂停 seek 不重绘 / 两条 SEEK_DONE" 已修并有真实媒体回归测试（`test_seek`，设
+> `OP_SDK_TEST_MEDIA` 才跑），`ctest` 4/4（带媒体时 5/5）。
+> 下一步：无 Qt 的 `examples/console`（PPM + PCM 落盘，鸿蒙调试的对照组）→
+> 真实媒体的音画同步验收 → 鸿蒙壳。每步都要能编、能测、能演示。

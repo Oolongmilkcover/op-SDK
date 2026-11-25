@@ -28,9 +28,11 @@ examples/
 做法就一行 `add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../.. …)`，见 `qtplayer/CMakeLists.txt`
 里"内核与门面：用主仓库的，不在这里复制"那段。
 
-**当前状态：能编、能跑，但 `app/` 还没改成走 C 接口。**
-它现在还是直接用 core 的 C++ 类（`PlayerCore` / `DemuxThread` / `IAudioOutput`…），
-也就是"接入 SDK 之前"的形态。真正的适配工作就是从这一步开始（见下）。
+**当前状态：已适配 C 接口（2026-11-25）。**
+`app/player.cpp` 只调 `op_*`（`op_create / op_open / op_play / op_pause / op_seek_ms …`），
+回调是 static 成员 + `PlayerCtx::self` 回到对象；视频帧在回调里 `op_frame_clone` 后
+`QueuedConnection` 交给 GUI；音频是 `QAudioSink` + 只读 `QIODevice`（`readData` 里
+`op_audio_read`），并在 POSITION 事件里回传设备积压。播放列表只属于壳，core 不再参与。
 
 ## 为什么不在根 `CMakeLists.txt` 里 `add_subdirectory(examples/qtplayer)`
 

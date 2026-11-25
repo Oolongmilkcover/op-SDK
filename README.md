@@ -16,11 +16,15 @@
 
 | 项 | 状态 |
 |---|---|
-| `core/`（27 个文件，零 Qt） | ✅ 可编译 |
-| `op_core` 静态库 | ✅ |
-| `tests/test_framequeue`（FrameQueue 状态机，headless） | ✅ 通过 |
-| `include/op/op_player.h`（C 接口） | ⚠️ 设计稿，**无实现** |
-| C 门面 / console 示例 / 鸿蒙壳 | ❌ 未开始 |
+| `core/`（零 Qt） | ✅ 可编译 |
+| `op_core` / `op_sdk` 静态库 | ✅ |
+| 对外 C 接口（open / 事件 / 视频帧 / 音频 pull / fd / 日志） | ✅ 已实现 |
+| `tests/*`（framequeue / api / audioring / fdavio） | ✅ `ctest` 4/4 |
+| `tests/test_seek`（暂停 seek 回归） | ✅ 需 `OP_SDK_TEST_MEDIA`，否则 SKIP |
+| Qt 消费者示例 `examples/qtplayer` | ✅ 已适配（只调 `op_*`，音频 `QAudioSink` 拉流） |
+| 无 Qt 的 console 示例 / 鸿蒙壳 | ❌ 未开始 |
+
+调用方法看 **[docs/API.md](docs/API.md)**（线程模型、帧所有权、音频积压、FAQ）。
 
 ---
 
@@ -68,9 +72,11 @@ op-SDK/
 │   ├── iaudiooutput.h        #   音频出口接口（push；对外要包成 pull）
 │   ├── log.h / perfclock.h   #   日志 / 纳秒时钟
 ├── src/                      # C 门面：op_player.cpp + audioring.h/.cpp（fdavio 在 core/）
-├── tests/                    # FrameQueue / API / AudioRing / fdAVIO 单测（CTest 注册）
+├── tests/                    # FrameQueue / API / AudioRing / fdAVIO / seek 回归（CTest 注册）
+├── examples/qtplayer/        # Qt6 消费者示例（独立子项目，不进根构建）
 ├── cmake/FFmpeg.cmake        # ffmpeg_deps（Win: FFMPEG_PATH / Linux: pkg-config）
 └── docs/
+    ├── API.md                # 使用说明书（调用方法、线程/所有权、FAQ）
     ├── SDK-PLAN.md           # 分阶段计划与验收标准
     ├── NOTES.md              # 开发笔记（AudioRing / 自定义 AVIO）
     └── AVIO.md               # AVIO 学习笔记（概念、示例、缓冲、排查表）
