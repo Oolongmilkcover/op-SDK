@@ -105,8 +105,6 @@ void AudioPlayer::pump()
             logged = true;
             qDebug() << "[Audio] first PCM write" << got << "bytes";
         }
-        if (m_logNextWrite.exchange(false) && !qgetenv("OP_QT_SEEK_MS").isEmpty())
-            qDebug() << "[pump] first write after clear" << got;
     }
 
     static int dbg = 0;
@@ -155,7 +153,14 @@ void AudioPlayer::clear()
     m_sink->reset();
     m_io = m_sink->start();
     if (!m_io) {
-        qDebug() << "[Audio] clear 后 start 失败:" << m_sink->error();
+        /*
+         * 设备已经被 reset 停掉、又起不来：留着这个 sink 只会全程静音（isOpen() 还是 true，
+         * playFile 也不会重新 open）。直接释放掉，让下一次 playFile 走完整重建。
+         */
+        qDebug() << "[Audio] clear 后 start 失败，释放设备:" << m_sink->error();
+        m_sink->stop();
+        delete m_sink;
+        m_sink = nullptr;
         return;
     }
 
@@ -165,8 +170,6 @@ void AudioPlayer::clear()
     m_io->write(silence.data(), (qint64)silence.size());
 
     if (wasPaused) m_sink->suspend();
-
-    m_logNextWrite.store(true);
 }
 
 void AudioPlayer::setPause(bool isPause)

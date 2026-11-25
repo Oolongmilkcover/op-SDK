@@ -77,6 +77,7 @@ QtPlayer.exe --audiotest 最小声卡自检：只建 QAudioSink、写静音，
 |---|---|
 | `OP_QT_NO_AUDIO=1` | 整场跳过音频设备初始化（判断"卡住是不是被音频时钟拖的"） |
 | `OP_QT_SEEK_MS=5000` | 打开 1.2 秒后自动 seek 一次，并打印 `[seek-test]` 的位置/落点（排查 seek） |
+| `OP_QT_SEEK_EVERY=400` | 每 400ms 自动 seek 一次（压测 seek 路径与内存；配合任务管理器看 RSS） |
 
 > 如果你之前用"自带 core 的旧版 CMakeLists"配过这个目录，**先删掉 `examples/qtplayer/build/`
 > 再重新配置** —— 源清单和 include 路径全变了，旧 cache 会指向已删除的 `core/*.cpp`。

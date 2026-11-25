@@ -62,7 +62,6 @@ private:
 
     std::mutex        m_mutex;       // 保护 m_sink/m_io/clear
     std::atomic<bool> m_isPaused{false};
-    std::atomic<bool> m_logNextWrite{false};   // 调试：clear 之后第一次写 PCM 打时间戳
     op_player*        m_player = nullptr;
     qreal             m_savedVolume = 0.5;
 

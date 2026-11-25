@@ -580,11 +580,12 @@ void Player::postSeek(long long targetMs)
     m_canSeekUntilMs = QDateTime::currentMSecsSinceEpoch() + kSeekLockTimeoutMs;
     op_seek_ms(m_ctx.player,targetMs);
     /*
-     * 声卡里还压着 seek 之前的 PCM（设备缓冲 ~85ms）。不清的话，seek 完成后
-     * 会先响一段旧位置的声音再跳到新位置 —— 听感就是"seek 延迟很高"。
-     * 这里立刻把设备缓冲丢掉；新位置的 PCM 由 core 在 ~几 ms 内重新填进来。
+     * 这里**不要**调 m_auPlayer->clear() 去丢设备缓冲。
+     * 实测 QAudioSink::reset() + start() 每次都会新建一个 QIODevice，
+     * 频繁拖动进度条就一直在分配（压测 RSS 线性上涨），而换来的只是提前丢 85ms 旧音频。
+     * 设备缓冲已经从 250ms 压到 85ms，这点尾巴可以接受；
+     * 真正的积压（SDK 环形 120ms）由 core 在 doSeek 里 clear 掉。
      */
-    if (m_auPlayer && m_auPlayer->isOpen()) m_auPlayer->clear();
 }
 
 
@@ -592,7 +593,7 @@ void Player::postSeek(long long targetMs)
 void Player::stepFrame(int mode)
 {
     //未初始化和纯音频文件不能逐帧
-    if(!m_isInit ||op_is_music(m_ctx.player)) return;
+    if(!m_isInit || op_is_music(m_ctx.player)) return;
     //流媒体没有"上一帧/下一帧"这个概念（底层也回退不了），不进入逐帧模式
     if(op_is_stream(m_ctx.player)) return;
     /*
@@ -655,7 +656,7 @@ void Player::changeSpeed(double delta)
      * 于是“按了一下居然没变/跳了一档”。
      */
     op_set_speed(m_ctx.player,qRound(m_speed * 10.0));
-    ui->ctrlbar->setSpeedLabel(op_get_speedX10(m_ctx.player));
+    ui->ctrlbar->setSpeedLabel(op_get_speedX10(m_ctx.player)*1.0/10.0);
 }
 
 void Player::onEVT_PREPARED(const op_event *ev)
@@ -683,8 +684,12 @@ void Player::onEVT_PREPARED(const op_event *ev)
         */
         ui->ctrlbar->setStreamMode(isStream);
         //纯音频没有帧可逐：直接把逐帧入口关掉（按钮置灰），别让用户点进去再被核心拒绝
-        ui->ctrlbar->setFrameStepEnabled(hasVideo
-                                         && !isStream);
+        if(op_is_audio_media(m_ctx.player)){
+            ui->ctrlbar->setFrameStepEnabled(false);
+        }else{
+            ui->ctrlbar->setFrameStepEnabled(hasVideo
+                                              && !isStream);
+        }
         if (isStream && m_speed != 1.0) {
             //倍速已经被 DemuxThread::openFile 强制拉回 1.0，标签也得跟着回到 1.0，
             //否则界面写着 2.0x、实际按 1.0x 播，而倍速按钮又是灰的，用户无从判断。
@@ -727,6 +732,19 @@ void Player::onEVT_PREPARED(const op_event *ev)
                          << "position before" << m_pts;
                 postSeek(ms);
             });
+        }
+        // 调试：OP_QT_SEEK_EVERY=500 时每 500ms 自动 seek 一次（压测 clear/start 与内存）
+        const QByteArray every = qgetenv("OP_QT_SEEK_EVERY");
+        if (!every.isEmpty() && every.toInt() > 0) {
+            auto *t = new QTimer(this);
+            const int period = every.toInt();
+            connect(t, &QTimer::timeout, this, [this, period]() {
+                const long long dur = m_durationMs > 0 ? m_durationMs : 1000;
+                const long long target = (m_pts + (long long)period * 3) % dur;
+                qDebug() << "[seek-test] auto seek" << target;
+                postSeek(target);
+            });
+            t->start(period);
         }
 
     },Qt::QueuedConnection);
