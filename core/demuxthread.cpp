@@ -861,6 +861,14 @@ void DemuxThread::doSeek()
         // 否则 m_fmt_ctx 为空 / 没有音频流时它会永久停在 true，
         // player.cpp 的 queueSeekBy 开头会直接 return，快进/快退彻底失效。
         m_seekPauseing.store(false);
+        /*
+         * 必须在 setPause(wasPause) **之前**清 m_isSeeking：
+         * DemuxThread::setPause() 用 m_isSeeking 当 hold（"seek 期间先别恢复"），
+         * 而这里正是"seek 结束、该恢复"的时刻。顺序反了的话 hold 恒为 true，
+         * 音频线程被永久按在暂停态 —— 表现就是 seek 之后时钟/声音都不动
+         * （MP3 这类纯音频最明显：位置停在落点、再也没声音）。
+         */
+        m_isSeeking.store(false);
         setPause(wasPause);
         /*
          * 这里必须补 CTX_IS_SEEKING=0：requestSeekMs() 发起 seek 时置过 1，
@@ -918,10 +926,10 @@ void DemuxThread::doSeek()
         if (!isCompleteInit || !m_fmt_ctx || (!m_hasVideo && !m_hasAudio)) {
             //以“现在”的用户意图为准（期间用户可能按过播放/暂停）
             const bool restorePause = m_isPause.load();
+            m_isSeeking.store(false);   // 先清标志，setPause 的 hold 才不会把它按住
             m_msgQue->push(std::move(m_msgQue->getMsg(ContextChange::CTX_IS_PAUSE,restorePause)));
             if (m_videoDecodeThread) m_videoDecodeThread->setPause(restorePause);
             if (m_hasAudio && m_audioThread) m_audioThread->setPause(restorePause);
-            //m_isSeeking.store(false);    // seek 结束，清“进行中”标志
             m_msgQue->push(std::move(m_msgQue->getMsg(ContextChange::CTX_IS_SEEKING,0)));
             m_seekPauseing.store(false); // 早退也必须清，否则快进/快退会永久失效
             //这里不能开启按钮，太快了，必须要等到SEEKDONE再开
@@ -984,6 +992,8 @@ void DemuxThread::doSeek()
     // 用开头快照的话，seek 期间用户按下的播放/暂停会被丢掉（表现为快进后按一次播放没反应）。
     const bool restorePause = m_isPause.load();
     if (seekDebugOn()) logDebug() << "[seek] restore pause =" << restorePause;
+    // 先清 m_isSeeking 再 setPause：后者拿它当 hold，顺序反了会把播放永久按住（见纯音频分支的注释）
+    m_isSeeking.store(false);
     m_msgQue->push(std::move(m_msgQue->getMsg(ContextChange::CTX_IS_PAUSE,restorePause)));
     if (m_videoDecodeThread) m_videoDecodeThread->setPause(restorePause);
     if (m_hasAudio && m_audioThread) m_audioThread->setPause(restorePause);

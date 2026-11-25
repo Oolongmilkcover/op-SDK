@@ -71,8 +71,12 @@ QtPlayer.exe --audiotest 最小声卡自检：只建 QAudioSink、写静音，
                          "Qt 音频后端坏了"还是"我们的封装有问题"
 ```
 
-另外支持 `OP_QT_NO_AUDIO=1` 环境变量：完全跳过音频设备初始化。
-排查"视频卡住是不是被音频时钟拖住的"时非常有用。
+另外支持几个环境变量：
+
+| 变量 | 作用 |
+|---|---|
+| `OP_QT_NO_AUDIO=1` | 整场跳过音频设备初始化（判断"卡住是不是被音频时钟拖的"） |
+| `OP_QT_SEEK_MS=5000` | 打开 1.2 秒后自动 seek 一次，并打印 `[seek-test]` 的位置/落点（排查 seek） |
 
 > 如果你之前用"自带 core 的旧版 CMakeLists"配过这个目录，**先删掉 `examples/qtplayer/build/`
 > 再重新配置** —— 源清单和 include 路径全变了，旧 cache 会指向已删除的 `core/*.cpp`。

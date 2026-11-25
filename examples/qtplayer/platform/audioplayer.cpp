@@ -100,6 +100,11 @@ void AudioPlayer::pump()
         }
     }
 
+    static int dbg = 0;
+    if (!qgetenv("OP_QT_SEEK_MS").isEmpty() && (++dbg % 100 == 0))
+        qDebug() << "[pump-dbg]" << dbg << "free" << freeBytes
+                 << "got" << got << "state" << m_sink->state();
+
     // 把"设备里还没播"的时长报给 SDK（音频时钟的延迟补偿）
     const qint64 bytes = m_sink->bufferSize() - m_sink->bytesFree();
     const qint64 bps   = (qint64)sampleRate * (sampleSize / 8) * channels;

@@ -15,6 +15,7 @@
 #include <QInputDialog>
 #include <QDebug>
 #include <QDateTime>          // QDateTime::currentMSecsSinceEpoch：进度条"钉住"/m_canSeek 的截止时刻
+#include <QTimer>             // OP_QT_SEEK_MS 自动 seek 调试入口
 #include <memory>             // on_video 里的 FrameSlot 用 shared_ptr 防止投递丢失时泄漏
 #include "platform/audioplayer.h"
 #include "platform/videowidget.h"
@@ -711,6 +712,17 @@ void Player::onEVT_PREPARED(const op_event *ev)
             ui->video->clearScreen();   // 纯音频：黑屏
         }
 
+        // 调试：OP_QT_SEEK_MS=5000 时，打开 1.2 秒后自动 seek 一次
+        const QByteArray autoSeek = qgetenv("OP_QT_SEEK_MS");
+        if (!autoSeek.isEmpty()) {
+            const int ms = autoSeek.toInt();
+            QTimer::singleShot(1200, this, [this, ms]() {
+                qDebug() << "[seek-test] request" << ms
+                         << "position before" << m_pts;
+                postSeek(ms);
+            });
+        }
+
     },Qt::QueuedConnection);
 }
 
@@ -729,6 +741,8 @@ void Player::onEVT_POSITION(const op_event *ev)
      */
 
     if (seekDebugOn()) qDebug() << "[seek] position" << ms;
+    if (!qgetenv("OP_QT_SEEK_MS").isEmpty())
+        qDebug() << "[seek-test] pos" << ms;
     QMetaObject::invokeMethod(this,[this,ms,speed](){
         m_pts = ms;
         const qint64 now = QDateTime::currentMSecsSinceEpoch();
@@ -801,6 +815,8 @@ void Player::onSEEkDONE(const op_event *ev)
     // 落点必须用事件里的 position_ms：回调排队到 GUI 线程后 op_position_ms()
     // 可能已经是"播放中的下一个位置"了（之前这里误用了 op_duration_ms）。
     int64_t ms = ev->position_ms;
+    qDebug() << "[seek-test] done" << (long long)ms
+             << "canSeek" << m_canSeek;
     if (seekDebugOn()) qDebug() << "[seek] done" << ms << "pending" << m_pendingSeekMs;
     QMetaObject::invokeMethod(this,[this,ms](){
         //落地：解除“禁止再发 seek”
