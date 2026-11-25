@@ -89,6 +89,7 @@ DemuxThread::~DemuxThread()
     // 先让 demux 线程停下来并收尸，再释放它引用的解码线程 / 封装上下文，
     // 否则可能出现"run() 还在用 m_fmt_ctx，析构已经 avformat_close_input"的悬空访问。
     m_isExit.store(true);
+    m_isSeeking.store(false);   // 退出/析构时清掉"seek 进行中"，别带进下一次 open
     if (m_msgQue) m_msgQue->push(std::move(m_msgQue->getMsg(ContextChange::CTX_IS_EXIT,1)));
     if (m_dumuxThread.joinable()) m_dumuxThread.join();
 
@@ -161,6 +162,7 @@ bool DemuxThread::openFile(const char* url,PaintFrame cb , IAudioOutput* out , i
     m_msgQue->push(std::move(m_msgQue->getMsg(ContextChange::CTX_IS_EXIT,0)));
     m_serial.store(0); //每次加载时serial清零
     m_seekPauseing.store(false); //兜底：清掉上一次可能残留的“seek 进行中”
+    m_isSeeking.store(false);    // 本地权威标志也要复位（close() 已清过，这里防早退路径）
     //这次打开的是不是网络流媒体（先算出来，成功后再写进成员，失败不污染状态）
     //fd 打开不可能是网络流；url 只有在没有 fd 时才参与判断
     const bool streamMedia = !hasFd && isStreamUrl(url);
@@ -407,7 +409,8 @@ void DemuxThread::setPause(bool isPause)
     if (m_isFrameStep.load()) endFrameStep();
 
     //正好有 seek 在处理时先别恢复渲染/解码，免得闪过期帧（doSeek 结束会按这个状态恢复）
-    bool hold = m_playerctx->getIsSeeking();
+    //读本地的 m_isSeeking，不读 PlayerContext（异步副本，会慢一个消息往返）。
+    bool hold = m_isSeeking.load();
 
     m_isPause.store(isPause);
     m_msgQue->push(std::move(m_msgQue->getMsg(ContextChange::CTX_IS_PAUSE,isPause?1:0)));
@@ -528,6 +531,13 @@ bool DemuxThread::requestSeekMs(long long ms)
 
 
     //m_seekMs.store(ms);
+    /*
+     * 先写本地目标、再置"进行中"——doSeek 一看到标志就会去读目标，
+     * 两条都是本地的原子量，不存在读到上一次目标的问题（原来目标要等消息循环
+     * 处理 CTX_SEEKMS 才写进 ctx）。
+     */
+    m_seekTargetMs.store(ms);
+    m_isSeeking.store(true);
     m_msgQue->push(std::move(m_msgQue->getMsg(ContextChange::CTX_SEEKMS,ms)));
     m_serial.fetch_add(1);
 
@@ -554,6 +564,7 @@ void DemuxThread::close()
     // 这样下面 join 时它们能立刻退出来。只发 CTX_IS_EXIT 消息是不够的 ——
     // 那条消息要等 PlayerCore 的循环处理完才生效，而 close() 往往正是在那个循环里调的。
     m_isExit.store(true);
+    m_isSeeking.store(false);   // 退出/析构时清掉"seek 进行中"，别带进下一次 open
     m_msgQue->push(std::move(m_msgQue->getMsg(ContextChange::CTX_IS_EXIT,1)));
     //退出逐帧（这里不做位置对齐，马上要关了）
     m_isFrameStep.store(false);
@@ -695,11 +706,10 @@ void DemuxThread::run()
         }
 
         // 处理 seek
-        // 注意：这里不再用 exchange(false) 提前清标志——m_isSeeking 现在表示
-        // “seek 正在进行中”，必须一直保持到 doSeek() 结束：
-        // setPause() 用它作 hold（“seek 处理中先别恢复解码/渲染”），
-        // requestSeekMs() 用它跳过“doSeek 临时暂停”的窗口。
-        if (m_playerctx->getIsSeeking())
+        // **读本地的 m_isSeeking**，不读 PlayerContext 的 getIsSeeking()：
+        // 后者是异步广播副本，doSeek 结束时推的 0 还没被消息循环处理，这里会立刻
+        // 再进一次 doSeek（一次 seek 两条 SEEK_DONE、第二次把刚画的帧清掉）。
+        if (m_isSeeking.load())
         {
             doSeek();
             continue;
@@ -747,15 +757,14 @@ void DemuxThread::run()
                          */
                         m_msgQue->push(std::move(m_msgQue->getMsg(PlayerEvent::EVT_COMPLETED)));
                         /*
-                         * 流媒体：既不重播也不切下一集（这两个机制对直播都没意义），
-                         * 直接暂停停在尾帧。否则下面的 seek(0.0) 会被 requestSeekMs
-                         * 的流媒体闸门挡掉，然后反复触发 EOF —— 变成忙等。
+                         * 播放列表不再由 core 管（CTX_HAS_PLAYLIST / EVT_PLAYNEXT 已删）：
+                         *   - 流媒体：停在尾帧（重播对直播没意义）；
+                         *   - 本地文件：自动从头重播；
+                         *   - 有下一集：壳在 OP_EVENT_COMPLETED 里自己 op_open 新文件，
+                         *     会覆盖掉这次重播，不会重复出画面。
                          */
                         if(m_isStreamMedia.load()){
                             setPause(true);
-                        }else if(m_playerctx->getHasPlayList()){
-                            //emit playNext();
-                            m_msgQue->push(std::move(m_msgQue->getMsg(PlayerEvent::EVT_PLAYNEXT)));
                         }else{
                             seek(0.0);
                         }
@@ -768,12 +777,9 @@ void DemuxThread::run()
                         m_eof.store(false);
                         // 同视频分支：先把"播完"通知出去，再决定流媒体暂停 / 切下一集 / 重播
                         m_msgQue->push(std::move(m_msgQue->getMsg(PlayerEvent::EVT_COMPLETED)));
-                        //流媒体同视频分支：不重播、不切下一集，暂停收尾
+                        //流媒体同视频分支：停在尾帧；本地文件自动重播
                         if(m_isStreamMedia.load()){
                             setPause(true);
-                        }else if(m_playerctx->getHasPlayList()){
-                            //emit playNext();
-                            m_msgQue->push(std::move(m_msgQue->getMsg(PlayerEvent::EVT_PLAYNEXT)));
                         }else{
                             seek(0.0);
                         }
@@ -821,8 +827,8 @@ void DemuxThread::doSeek()
         av_packet_free(&m_pendingPkt);
         m_pendingPkt = nullptr;
     }
-    //seek（目标毫秒由 requestSeekMs 统一换算好）
-    int64_t seekMs = m_playerctx->getSeekMs();
+    //seek（目标毫秒：requestSeekMs() 已写进本地原子量，不读 ctx 的异步副本）
+    int64_t seekMs = m_seekTargetMs.load();
 
 
     //纯音频（MP3等）：底层直接 seek
@@ -867,6 +873,7 @@ void DemuxThread::doSeek()
         int tmp_arg1 = static_cast<int>(seekMs>>32); //高32位
         int tmp_arg2 = static_cast<int>(seekMs & 0xFFFFFFFF);//低32位
         m_msgQue->push(std::move(m_msgQue->getMsg(PlayerEvent::EVT_SEEK_DONE,tmp_arg1,tmp_arg2)));
+        m_isSeeking.store(false);   // 纯音频分支也算这次 seek 结束
         return ;
     }
 
@@ -931,6 +938,7 @@ void DemuxThread::doSeek()
                 int tmp_arg2 = static_cast<int>(seekMs & 0xFFFFFFFF);//低32位
                 m_msgQue->push(std::move(m_msgQue->getMsg(PlayerEvent::EVT_SEEK_DONE,tmp_arg1,tmp_arg2)));
             }
+            m_isSeeking.store(false);   // 早退也算"这次 seek 结束"
             return;
         }
         avformat_flush(m_fmt_ctx);
@@ -992,6 +1000,7 @@ void DemuxThread::doSeek()
     int tmp_arg1 = static_cast<int>(realSeekMs>>32); //高32位
     int tmp_arg2 = static_cast<int>(realSeekMs & 0xFFFFFFFF);//低32位
     m_msgQue->push(std::move(m_msgQue->getMsg(PlayerEvent::EVT_SEEK_DONE,tmp_arg1,tmp_arg2)));
+    m_isSeeking.store(false);   // 这次 seek 到此结束（本地权威状态，run() 下一轮不会重入）
 }
 
 void DemuxThread::doBackwardRefill()
@@ -1110,12 +1119,6 @@ bool DemuxThread::getIsExit() const
     // FFmpeg 的中断回调也走这里：close() 一置 m_isExit，
     // 阻塞在 av_read_frame 的网络流就能立刻被打断，不会卡住 join。
     return shouldExit();
-}
-
-void DemuxThread::setHasPlayList(bool has)
-{
-    //m_hasPlayList.store(has);
-    m_msgQue->push(std::move(m_msgQue->getMsg(ContextChange::CTX_HAS_PLAYLIST,has?1:0)));
 }
 
 void DemuxThread::setSpeed(double speed)

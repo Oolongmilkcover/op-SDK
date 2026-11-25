@@ -111,10 +111,6 @@ public:
         return d->getIsExit();   // 退出标志
     }
 
-    void setVolume(double& pos);
-
-    void setHasPlayList(bool has);
-
     // 倍速：同时设置音频 atempo 和视频帧时长
     void setSpeed(double speed);
 
@@ -131,6 +127,21 @@ public:
     //bool isStreamMedia() const { return m_isStreamMedia.load(); }
 
     std::atomic<bool> m_seekPauseing = false;
+
+    /*
+     * seek 的**权威状态**（本地）。PlayerContext 里那份是给 UI 的异步广播副本，
+     * 比真实状态慢一个消息往返。
+     *
+     * 用副本做判断会出两个真 bug：
+     *   1) doSeek() 结尾推了 CTX_IS_SEEKING=0，但消息循环还没处理，run() 立刻又看到
+     *      "还在 seek"→ 再进一次 doSeek() → 一次 seek 收到**两条 SEEK_DONE**，
+     *      而且第二次会把刚画出来的帧清掉（表现为"暂停时 seek 不重绘、落点不生效"）；
+     *   2) requestSeekMs() 里目标值也是经 CTX_SEEKMS 异步写进 ctx 的，如果只看本地
+     *      flag 不看本地目标，doSeek 可能读到**上一次**的目标。
+     * 所以两个都放本地：写请求时一起写，doSeek 只读本地。
+     */
+    std::atomic<bool>      m_isSeeking{false};
+    std::atomic<long long> m_seekTargetMs{0};
 
 private:
     void setDone();
