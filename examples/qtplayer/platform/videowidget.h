@@ -1,12 +1,11 @@
 #pragma once
-
+#include "include/op/op_player.h"
 #include <QOpenGLWidget>
 #include <QOpenGLFunctions>
 #include <QOpenGLShaderProgram>
 #include <mutex>
 #include<string>
 #include <atomic>
-struct AVFrame;
 class VideoWidget : public QOpenGLWidget, protected QOpenGLFunctions
 {
     Q_OBJECT
@@ -15,7 +14,7 @@ public:
     virtual void Init(int width, int height);
 
     //不管成功与否都释放frame空间
-    virtual void setPaint(AVFrame *frame);
+    virtual void setPaint(op_frame *frame);
 
     /*
      * "上屏最新帧优先"用的两个钩子：
@@ -83,7 +82,7 @@ private:
      * paintGL() 直接从这一帧的内存上传纹理，不再先 memcpy 到中间缓冲，
      * 所以 setPaint() 只是"换指针 + update()"，GUI 线程每帧少拷 3MB。
      */
-    AVFrame* m_frame = nullptr;
+    op_frame* m_frame = nullptr;
 
     //是否已经有一帧正在 GUI 线程排队等上屏
     std::atomic<bool> m_paintInFlight{false};

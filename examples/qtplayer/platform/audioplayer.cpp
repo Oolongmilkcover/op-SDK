@@ -1,167 +1,154 @@
 #include "platform/audioplayer.h"
+
 #include <QAudioSink>
 #include <QAudioDevice>
 #include <QAudioFormat>
 #include <QMediaDevices>
 #include <QIODevice>
-#include <mutex>
 #include <QDebug>
 
+#include <algorithm>
+#include <climits>
 
-bool AudioPlayer::open(int sampleRate, int channels){
+/*
+ * 把 op_audio_read 包成一个只读 QIODevice。
+ *
+ * QAudioSink::start(device) 会按声卡节奏在这个设备上调 readData()：
+ * 要多少给多少，没数据就返回 0（Qt 会等，不会忙转）。
+ */
+class AudioIoDevice : public QIODevice
+{
+public:
+    explicit AudioIoDevice(op_player* player, QObject* parent = nullptr)
+        : QIODevice(parent), m_player(player) {}
+
+    bool isSequential() const override { return true; }
+
+    // 告诉 Qt "可能还有数据"：返回一个正数，避免它在 bytesAvailable()==0 时
+    // 提前判定 EOF。真正的量由 readData 返回 0 来表达。
+    qint64 bytesAvailable() const override { return 16 * 1024 + QIODevice::bytesAvailable(); }
+
+protected:
+    qint64 readData(char* data, qint64 maxlen) override
+    {
+        if (!m_player || maxlen <= 0) return 0;
+        const int cap = static_cast<int>(std::min<qint64>(maxlen, INT_MAX));
+        const int n = op_audio_read(m_player, data, cap);
+        // 返回 0 = 暂时没数据（不是 EOF），Qt 会稍后再来要
+        return n > 0 ? n : 0;
+    }
+
+    qint64 writeData(const char*, qint64) override { return -1; }
+
+private:
+    op_player* m_player = nullptr;
+};
+
+AudioPlayer::AudioPlayer() = default;
+
+AudioPlayer::~AudioPlayer()
+{
     close();
-    // 把这次真正打开的格式记进成员：getNoPlayMs() 要用它算 bytesPerSecond，
-    // 否则设备实际跑在别的采样率时，音频时钟（= PTS - 未播毫秒）会按 48k 算错。
+}
+
+bool AudioPlayer::open(int sampleRate, int channels, op_player* player)
+{
+    if (!player || sampleRate <= 0 || channels <= 0) return false;
+
+    close();
+
     this->sampleRate = sampleRate;
     this->channels   = channels;
-    //音频格式配置
+    m_player         = player;
+
     QAudioFormat fmt;
     fmt.setSampleRate(sampleRate);
     fmt.setChannelCount(channels);
     fmt.setSampleFormat(QAudioFormat::Int16);
-    if(!fmt.isValid()){
+    if (!fmt.isValid()) {
         qDebug() << "无效音频格式";
         return false;
     }
 
-    // ==========获取默认音频设备 ==========
-    const QAudioDevice &device = QMediaDevices::defaultAudioOutput();
-    if(!device.isFormatSupported(fmt)){
-        qDebug()<<"音频格式不支持";
+    const QAudioDevice dev = QMediaDevices::defaultAudioOutput();
+    if (!dev.isFormatSupported(fmt)) {
+        qDebug() << "音频格式不支持";
         return false;
     }
+
     std::lock_guard<std::mutex> lock(m_mutex);
-    // ========== Qt6创建 QAudioSink ==========
-    /*
-     * 这里刻意不传 parent。
-     *
-     * AudioPlayer 对象是在 GUI 线程 new 出来的，而 open() 由 core 的消息循环线程
-     * 经 DemuxThread → AudioThread 调进来；给一个"属于别的线程"的 QObject 当 parent
-     * 会触发 Qt 的跨线程父子关系告警（Debug 下可能直接 abort）。
-     * sink 的生命周期全部由 close() 里的 delete 管理，本来也不需要 parent。
-     */
-    m_sink = new QAudioSink(device, fmt);
-    m_sink->setVolume(m_savedVolume);
-    //m_sink->setBufferSize(131072*10);
-    // 启动音频
-    m_io = m_sink->start();
-    if (!m_io) {
-        qDebug() << "启动音频失败";
-        delete m_sink;
-        m_sink = nullptr;
+    m_io = new AudioIoDevice(player);
+    if (!m_io->open(QIODevice::ReadOnly)) {
+        qDebug() << "AudioIoDevice open 失败";
+        delete m_io;
+        m_io = nullptr;
         return false;
     }
-    m_isPaused = false;
+    m_sink = new QAudioSink(dev, fmt);
+    m_sink->setVolume(m_savedVolume);
+    m_sink->start(m_io);          // 之后 Qt 自己按声卡节奏来拉数据
 
-
+    m_isPaused.store(false);
     return true;
 }
 
-void AudioPlayer::clear(){
+void AudioPlayer::close()
+{
     std::lock_guard<std::mutex> lock(m_mutex);
-    if (m_io) {
-        m_io->reset();
-    }
-}
-
-void AudioPlayer::close(){
-    std::lock_guard<std::mutex> lock(m_mutex);
-    if (m_io) {
-        m_io->close();
-        m_io = nullptr;
-    }
     if (m_sink) {
         m_sink->stop();
         delete m_sink;
         m_sink = nullptr;
     }
+    if (m_io) {
+        m_io->close();
+        delete m_io;
+        m_io = nullptr;
+    }
+    m_player = nullptr;
 }
 
-long long AudioPlayer::getNoPlayMs(){
+void AudioPlayer::clear()
+{
     std::lock_guard<std::mutex> lock(m_mutex);
+    if (m_sink) m_sink->reset();
+}
 
-    if (!m_sink)
-        return 0;
+void AudioPlayer::setPause(bool isPause)
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    if (!m_sink || m_isPaused.load() == isPause) return;
+    if (isPause) m_sink->suspend();
+    else         m_sink->resume();
+    m_isPaused.store(isPause);
+}
 
-    const qint64 bytes =
-        m_sink->bufferSize() -
-        m_sink->bytesFree();
+long long AudioPlayer::getNoPlayMs()
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    if (!m_sink) return 0;
 
+    const qint64 bytes = m_sink->bufferSize() - m_sink->bytesFree();
     const qint64 bytesPerSecond =
-        static_cast<qint64>(sampleRate) *
-        (sampleSize / 8) *
-        channels;
-
-    if (bytesPerSecond <= 0)
-        return 0;
-
+        static_cast<qint64>(sampleRate) * (sampleSize / 8) * channels;
+    if (bytesPerSecond <= 0) return 0;
     return bytes * 1000 / bytesPerSecond;
 }
 
-void AudioPlayer::setPause(bool isPause){
+void AudioPlayer::setPlayer(op_player* p)
+{
     std::lock_guard<std::mutex> lock(m_mutex);
-    // 如果当前状态已经一致，直接返回
-    if (!m_sink||m_isPaused == isPause)
-        return;
-    if (isPause) {
-        // 暂停
-        m_sink->suspend();
-    } else {
-        //恢复
-        m_sink->resume();
-        m_sink->setVolume(m_savedVolume);
-    }
-    m_isPaused = isPause;
+    m_player = p;
 }
 
-int AudioPlayer::write(const unsigned char *data, int datasize){
-    if(!data || datasize<=0){
-        return false;
-    }
-
-    std::lock_guard<std::mutex> lock(m_mutex);
-
-    if(!m_sink||!m_io){
-        return false;
-    }
-
-
-    qint64 written = m_io->write(
-        reinterpret_cast<const char*>(data),
-        datasize
-        );
-
-    if (written < 0)
-        return 0;
-
-    return static_cast<int>(written);
-}
-
-int AudioPlayer::getFree(){
-    std::lock_guard<std::mutex> lock(m_mutex);
-    if (!m_sink) return 0;
-    return m_sink->bytesFree();
-}
-
-void AudioPlayer::setVolume(qreal vol){
+void AudioPlayer::setVolume(qreal vol)
+{
     std::lock_guard<std::mutex> lock(m_mutex);
     m_savedVolume = vol;
-    if (!m_isPaused && m_sink) {  // 增加空判断
-        m_sink->setVolume(vol);
-    }
+    if (m_sink && !m_isPaused.load()) m_sink->setVolume(vol);
 }
-double AudioPlayer::getVolume(){
+
+double AudioPlayer::getVolume()
+{
     return double(m_savedVolume);
-}
-
-
-
-AudioPlayer::AudioPlayer()
-{
-}
-
-
-AudioPlayer::~AudioPlayer()
-{
-    this->close();
 }

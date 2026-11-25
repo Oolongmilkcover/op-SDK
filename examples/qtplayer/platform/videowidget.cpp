@@ -3,14 +3,10 @@
 #include <QOpenGLContext>
 #include <QTimer>
 #include <QTextStream>
-#include<sstream>
-#include<iostream>
-#include<QFile>
+#include <sstream>
+#include <iostream>
+#include <QFile>
 #include <QElapsedTimer>
-extern "C" {
-#include <libavutil/frame.h>
-#include <libavutil/pixfmt.h>   // AV_PIX_FMT_YUV420P：上屏前的准入判断
-}
 //自动加双引号
 #define GET_STR(x) #x
 #define A_VER 3
@@ -83,7 +79,7 @@ VideoWidget::~VideoWidget()
 {
     mux.lock();
     if (m_frame) {
-        av_frame_free(&m_frame);
+        op_frame_free(&m_frame);
         m_frame = nullptr;
     }
     mux.unlock();
@@ -107,7 +103,7 @@ void VideoWidget::clearScreen()
     mux.lock();
     //清掉缓存的那一帧 → paintGL 走"没帧"分支画黑
     if (m_frame) {
-        av_frame_free(&m_frame);
+        op_frame_free(&m_frame);
         m_frame = nullptr;
     }
     mux.unlock();
@@ -144,7 +140,7 @@ void VideoWidget::endPaint()
  * lambda）里做，因为它必须覆盖"尺寸不匹配直接丢弃"这条提前 return 的分支 ——
  * 否则丢一帧就把名额永久占死，之后再也上不了屏。
  */
-void VideoWidget::setPaint(AVFrame *frame)
+void VideoWidget::setPaint(op_frame *frame)
 {
     if (!frame) return;
 
@@ -156,11 +152,16 @@ void VideoWidget::setPaint(AVFrame *frame)
      * core 侧 FrameConverter 已经把帧统一成 yuv420p，正常走不到这里；
      * 万一还有漏网的，宁可丢这一帧并打日志，也不要在 GL 里踩空指针。
      */
+    // op_frame 是**一块紧凑连续的缓冲**（Y 平面 + U + V），没有 data[3] 指针数组；
+    // 三个平面的起点按 linesize 自己算（和头文件里写的偏移公式一致）。
     const bool sizeOk   = (width > 0 && height > 0
                            && frame->width == this->width
                            && frame->height == this->height);
-    const bool formatOk = (frame->format == AV_PIX_FMT_YUV420P
-                           && frame->data[0] && frame->data[1] && frame->data[2]);
+    const bool formatOk = (frame->format == OP_PIX_FMT_YUV420P
+                           && frame->data != nullptr
+                           && frame->size > 0
+                           && frame->linesize[0] > 0
+                           && frame->linesize[1] > 0);
     if (!sizeOk || !formatOk)
     {
         static int dropped = 0;
@@ -171,10 +172,10 @@ void VideoWidget::setPaint(AVFrame *frame)
                      << " 已丢弃=" << dropped;
         }
         mux.unlock();
-        av_frame_free(&frame);
+        op_frame_free(&frame);
         return;
     }
-    if (m_frame) av_frame_free(&m_frame);   // 上一帧用完了
+    if (m_frame) op_frame_free(&m_frame);   // 上一帧用完了
     m_frame = frame;                        // 零拷贝：只换指针
     mux.unlock();
 
@@ -186,7 +187,7 @@ void VideoWidget::Init(int width, int height)
     mux.lock();
     //尺寸可能会变，旧尺寸的帧直接丢掉
     if (m_frame) {
-        av_frame_free(&m_frame);
+        op_frame_free(&m_frame);
         m_frame = nullptr;
     }
     this->width = width;
@@ -368,7 +369,7 @@ void VideoWidget::paintGL()
     mux.lock();
 
     // 没有有效帧（还没 Init / 已 clearScreen / 尺寸不匹配）→ 画黑
-    if (!m_frame || !m_frame->data[0] || width == 0 || height == 0) {
+    if (!m_frame || !m_frame->data || width == 0 || height == 0) {
         mux.unlock();
         // 清屏为黑色
         glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
@@ -398,7 +399,16 @@ void VideoWidget::paintGL()
      * 不再经过 datas[] 中间缓冲 —— GUI 线程每帧少一次 3MB memcpy。
      * 注意：m_frame 在整个 paintGL 期间被 mux 保护着，数据一定有效。
      */
-    AVFrame* f = m_frame;
+    op_frame* f = m_frame;
+
+    // op_frame 只有一块连续 data：Y、U、V 依次排列（紧凑布局，行间无填充）
+    const uint8_t* plane[3] = {
+        f->data,
+        f->data + (size_t)f->linesize[0] * (size_t)f->height,
+        f->data + (size_t)f->linesize[0] * (size_t)f->height
+                 + (size_t)f->linesize[1] * (size_t)(f->height / 2)
+    };
+
     for (int p = 0; p < 3; ++p)
     {
         const int pw = (p == 0) ? width : width / 2;
@@ -411,7 +421,7 @@ void VideoWidget::paintGL()
         {
             //行宽正好等于平面宽度：一次上传（常见分辨率都是这种情况）
             glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, pw, ph,
-                            GL_RED, GL_UNSIGNED_BYTE, f->data[p]);
+                            GL_RED, GL_UNSIGNED_BYTE, plane[p]);
         }
         else
         {
@@ -420,7 +430,7 @@ void VideoWidget::paintGL()
             {
                 glTexSubImage2D(GL_TEXTURE_2D, 0, 0, i, pw, 1,
                                 GL_RED, GL_UNSIGNED_BYTE,
-                                f->data[p] + (size_t)f->linesize[p] * i);
+                                plane[p] + (size_t)f->linesize[p] * i);
             }
         }
         //与shader uni遍历关联

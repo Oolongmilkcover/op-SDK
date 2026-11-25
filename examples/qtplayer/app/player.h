@@ -7,6 +7,7 @@
 #include <QString>
 class VideoWidget;
 class AudioPlayer;
+class Player;
 
 QT_BEGIN_NAMESPACE
 namespace Ui {
@@ -17,24 +18,14 @@ QT_END_NAMESPACE
 
 
 
-// 1.全局上下文：用来在回调中传递状态
-struct PlayerContext {
+
+//全局上下文：用来在回调中传递状态
+struct PlayerCtx {
     op_player* player = nullptr;
+    Player*    self   = nullptr;   // 回调里要回到 Player 的成员函数（回调是 static 的）
     std::atomic<bool> running{true};
     int64_t duration = 0;
 };
-
-// 2.事件回调（运行在 SDK 的消息循环线程）
-void on_event(void* user, const op_event* ev) ;
-
-// 3. 视频帧回调（运行在 SDK 的渲染线程）
-void on_video(void* user, const op_frame* frame);
-
-// 4. 日志回调
-void on_log(void* user, int level, const char* line);
-
-// 5. 音频拉流线程（模拟平台的 AudioTrack / AudioRenderer）
-void audio_thread_func(PlayerContext* ctx);
 
 class Player : public QWidget
 {
@@ -143,13 +134,24 @@ private slots:
     void onEVT_ERROR(const op_event *ev);
 
     void onSEEkDONE(const op_event *ev);
+public:
+
+    /*
+     * 三个 C 回调必须是 **static**：op_event_cb 是普通函数指针
+     * （void(*)(void*, const op_event*)），非静态成员函数带 this、类型对不上。
+     * user 传的是 &m_ctx，回调里通过 m_ctx.self 回到 Player 的成员函数。
+     */
+    static void on_event(void* user, const op_event* ev);
+    static void on_video(void* user, const op_frame* frame);
+    static void on_log(void* user, int level, const char* line);
+
+
 private:
     Ui::Player *ui;
 
-    PlayerContext m_ctx;
+    PlayerCtx m_ctx;
 
     VideoWidget* m_widget;
-    void setVideoPainterCb();
 
     /*
      * seek 的两个私有出口/工具（所有 seek 请求都必须走 postSeek，别再各处自己 postMessage）：
@@ -162,7 +164,6 @@ private:
 
     // 视频帧渲染回调（std::function 本体，不是指针；
     // 传进 CMD_OPEN 时按值拷贝，Player 自己活得比它久）
-    //PaintFrame m_videoCb;
     AudioPlayer* m_auPlayer;
 
     //这个变量是为了处理短时间快速seek的导致的Core还未处理上次seek导致出现按键冲突
@@ -173,6 +174,8 @@ private:
     qint64 m_canSeekUntilMs = 0;
 
     bool m_isPause = false;
+
+    bool m_isStream = false;
 
     bool isSliderPress = false;
     //DemuxThread dt;
@@ -256,6 +259,5 @@ private:
 
     //用于显示进度条和供快进快退使用，大致有50~200ms的误差，可以接受
     long long m_pts = 0;
-
 };
 #endif // PLAYER_H

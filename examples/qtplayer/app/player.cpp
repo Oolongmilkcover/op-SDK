@@ -62,8 +62,6 @@ Player::Player(QWidget *parent)
         qDebug()<<"PlayerCore Init failed";
         exit(0);
     }
-    setVideoPainterCb();
-
 
     //设置窗口图标&默认窗口标题
     this->setWindowIcon(QIcon(":/workBtnPNG/OPlayer.png"));
@@ -164,7 +162,8 @@ Player::Player(QWidget *parent)
 
 
 
-    connect(ui->playList,&PlayList::noMoreToPlay,this,[this]{m_playerCore->postMessage(ContextChange::CTX_HAS_PLAYLIST,0);});
+    // 播放列表只作为 UI 的"下一集"来源；core 不再关心播放列表（CTX_HAS_PLAYLIST 已删），
+    // 播完由 OP_EVENT_COMPLETED 触发 playNext()。
 
     //支持拖文件进来
     setAcceptDrops(true);
@@ -172,18 +171,28 @@ Player::Player(QWidget *parent)
     //SDK调用
     // 1. 创建播放器
     m_ctx.player = op_create();
+    m_ctx.self   = this;
     if (!m_ctx.player) {
         qDebug()<<"创建播放器失败";
         exit(0);
     }
 
-    // 2. 注册回调
-    op_set_event_cb(m_ctx.player, on_event, &m_ctx);
-    op_set_video_cb(m_ctx.player, on_video, &m_ctx);
-    op_set_log_cb(m_ctx.player, on_log, &m_ctx);
+    // 2. 注册回调（静态成员函数可以隐式转成 C 函数指针）
+    op_set_event_cb(m_ctx.player, &Player::on_event, &m_ctx);
+    op_set_video_cb(m_ctx.player, &Player::on_video, &m_ctx);
+    op_set_log_cb(m_ctx.player,  &Player::on_log,  &m_ctx);
 
     // 3. 配置音频（必须在 open 之前！）
     op_set_audio_format(m_ctx.player, 48000, 2);
+
+    /*
+     * 4. 打开 Qt 音频设备并开始拉流。
+     * QAudioSink 建立后会一直在自己的音频线程里调 readData → op_audio_read，
+     * 没数据就返回 0（不忙转）。所以整场播放只需要 open 一次。
+     */
+    if (!m_auPlayer->open(48000, 2, m_ctx.player)) {
+        qDebug() << "音频设备打开失败，本次播放将没有声音";
+    }
 
 }
 
@@ -192,24 +201,24 @@ Player::~Player()
     if (m_seekDebounceTimerId) { killTimer(m_seekDebounceTimerId); m_seekDebounceTimerId = 0; }
 
     /*
-     * 顺序很重要：必须先"同步"停掉 core，再拆 UI。
-     *
-     * 以前这里只 postMessage(CMD_STOP) 就 delete ui —— 那是异步的，
-     * core 的消息循环 / 渲染线程随时可能回调进来，而 Player 和 ui 已经没了，
-     * 表现为退出时随机 0xC0000005。
-     *
-     * stop() 内部会 join 消息循环和 demux/解码/渲染/音频线程，返回之后
-     * 不会再有任何为 EVT_* 或视频帧回调进入 GUI 线程。
+     * 顺序很重要（三条都不能颠倒）：
+     *   1) 先停音频：QAudioSink 的 readData 正在调 op_audio_read，
+     *      player 释放后再回调就是 use-after-free；
+     *   2) 再 op_stop + op_destroy：stop 会 join 消息循环和 demux/解码/渲染/音频线程，
+     *      返回后不再有任何 EVT_* / 视频帧回调；
+     *   3) 最后拆 UI（delete ui）。
+     * 反过来任何一步都可能让后台线程回调进已经析构的对象，表现为退出时随机崩溃。
      */
-    if (m_playerCore) {
-        m_playerCore->stop();
-        delete m_playerCore;
-        m_playerCore = nullptr;
+    if (m_auPlayer) m_auPlayer->close();
+
+    if (m_ctx.player) {
+        op_stop(m_ctx.player);
+        op_destroy(m_ctx.player);
+        m_ctx.player = nullptr;
     }
-    delete m_auPlayer;   // ~AudioPlayer 里会 close() 设备
+
+    delete m_auPlayer;   // ~AudioPlayer 里再 close 一次（幂等）
     m_auPlayer = nullptr;
-    delete m_playerCtx;
-    m_playerCtx = nullptr;
 
     delete ui;
     ui = nullptr;
@@ -349,7 +358,11 @@ void Player::stopToPlay()
     m_seekUiHoldUntilMs = 0;
     m_canSeek           = true;
     m_canSeekUntilMs    = 0;
-    m_playerCore->postMessage(PlayerCmd::CMD_STOP);
+    op_stop(m_ctx.player);
+    if (m_auPlayer) {
+        m_auPlayer->setPause(true);
+        m_auPlayer->clear();      // 丢掉设备里残留的上一段 PCM
+    }
     m_widget->clearScreen();
     //停机后不再有"流媒体"状态，这些机制恢复默认可用（下次 playFile 会按新片源重新判定）
     ui->ctrlbar->setStreamMode(false);
@@ -403,32 +416,34 @@ void Player::playFile(const QString &path)
 
     if (path.isEmpty()) return;
 
-
-    // 起点：进程内统一的纳秒时间戳
-    //const qint64 startNs = perfNowNs();
-    //qDebug() << "[PERF] playFile entry, startNs = " << startNs <<" ns";
-
     //换文件前先退出逐帧
     exitStepFrame();
-    // SDK 的 CMD_OPEN_OBJ 在 T4/T5 之后多了 fd/offset/size 和输出格式四个参数：
-    // -1/0/0 = 不走 fd AVIO；48000/2 = 这个壳的 AudioPlayer 固定开的就是这个格式。
-    CMD_OPEN_OBJ* obj = new CMD_OPEN_OBJ(-1, 0, 0, path.toUtf8().constData(),
-    
-                                     m_videoCb, m_auPlayer, 48000, 2);
-    m_playerCore->postMessage(PlayerCmd::CMD_OPEN
-                              ,0
-                              ,0
-                              ,obj
-                              ,[](void* p){
-        delete static_cast<CMD_OPEN_OBJ*>(p);
-    });
+
+    // 打开成功后 SDK 会立即开始解码；先把上一轮残留的设备缓冲丢掉，
+    // 免得"先听到上一个文件的一小段"。
+    if (m_auPlayer) {
+        m_auPlayer->clear();
+        m_auPlayer->setPause(false);
+    }
+
+    op_open_options opt{};
+    opt.open_timeout_ms = 15000;
+    opt.fd = -1;
+    std::string pathStr = path.toStdString();
+    opt.path = pathStr.c_str();
+    op_result res = op_open(m_ctx.player,&opt);
+    if (res != OP_OK) {
+        // 处理打开失败
+        return;
+    }
     emit setPlayingText(path);
+
 }
 
 void Player::playNext()
 {
     //流媒体不支持上下集（播完也不会自动切，见 DemuxThread::run 的 EOF 分支）
-    if(m_playerCtx->getIsStreamMedia()) return;
+    if(m_isStream) return;
     QMetaObject::invokeMethod(this,[this](){
         QListWidget *list = ui->playList->getListWidget();
         if (list->count() == 0) return;
@@ -441,7 +456,7 @@ void Player::playNext()
 void Player::playPrev()
 {
     //流媒体不支持上下集
-    if(m_playerCtx->getIsStreamMedia()) return;
+    if(m_isStream) return;
     QMetaObject::invokeMethod(this,[this](){
         QListWidget *list = ui->playList->getListWidget();
         if (list->count() == 0) return;
@@ -462,13 +477,13 @@ void Player::onPlayList_doubleClicked(QListWidgetItem *item)
 
 void Player::ffSeekFiveSec()
 {
-    if(m_playerCtx->getIsFrameStep()) return;
+    if(m_stepFrame) return;
     queueSeekBy(+5000);
 }
 
 void Player::rewindSeekFiveSec()
 {
-    if(m_playerCtx->getIsFrameStep()) return;
+    if(m_stepFrame) return;
     queueSeekBy(-5000);
 }
 
@@ -481,11 +496,11 @@ void Player::queueSeekBy(long long deltaMs)
 {
     //流媒体不支持快进/快退（DemuxThread::requestSeekMs 里还有一道闸门兜底）
     //if(!m_isInit || dt.isStreamMedia() || dt.m_seekPauseing.load()) return;
-    if(!m_isInit || m_playerCtx->getIsStreamMedia()) return;
+    if(!m_isInit || m_isStream) return;
     //即使这一次因为“上一次 seek 还没落地”被丢弃，也要记下“用户还在连续操作”：
     //否则窗口会过期，随后落地的 SEEK_DONE 就会去抢进度条，造成按键/落地两套值互相顶。
     m_seekActiveUntilMs = QDateTime::currentMSecsSinceEpoch() + kSeekActiveWindowMs;
-    if(m_playerCtx->getIsSeeking() || !m_canSeek) return;
+    if(m_isStream || !m_canSeek) return;
 
     //逐帧中快进/快退：先退出逐帧（位置会对齐）
     exitStepFrame();
@@ -548,10 +563,7 @@ void Player::postSeek(long long targetMs)
     pinSeekTarget(targetMs);
     m_canSeek        = false;
     m_canSeekUntilMs = QDateTime::currentMSecsSinceEpoch() + kSeekLockTimeoutMs;
-
-    int tmp_arg1 = static_cast<int>(targetMs>>32); //高32位
-    int tmp_arg2 = static_cast<int>(targetMs & 0xFFFFFFFF);//低32位
-    m_playerCore->postMessage(PlayerCmd::CMD_SEEK,tmp_arg1,tmp_arg2);
+    op_seek_ms(m_ctx.player,targetMs);
 }
 
 
@@ -559,21 +571,22 @@ void Player::postSeek(long long targetMs)
 void Player::stepFrame(int mode)
 {
     //未初始化和纯音频文件不能逐帧
-    if(!m_isInit || m_playerCtx->getIsAudioMedia()) return;
+    if(!m_isInit ||op_is_music(m_ctx.player)) return;
     //流媒体没有"上一帧/下一帧"这个概念（底层也回退不了），不进入逐帧模式
-    if(m_playerCtx->getIsStreamMedia()) return;
+    if(op_is_stream(m_ctx.player)) return;
     /*
      * 纯音频没有帧可逐。正常情况下按钮已经被 CtrlBar::setFrameStepEnabled(false) 关掉了，
      * 这里再挡一道是因为 F/D 快捷键不经过按钮。
      * 挡住之后 UI 保持原状，不会切出“假的逐帧外观”（核心那边 stepNext/PrevFrame
      * 对无视频流本来也是直接返回 false）。
      */
-    if(!m_playerCtx->getHasVideo()) return;
+    if(!op_has_video(m_ctx.player)) return;
     //上一帧 / 下一帧：进入逐帧模式（暂停渲染，解码继续）
     if(mode == 1){
-        m_playerCore->postMessage(PlayerCmd::CMD_STEP_FORWARD);
+        op_step_frame(m_ctx.player,1);
     }else{
-        m_playerCore->postMessage(PlayerCmd::CMD_STEP_BACKWARD);
+        // dir 只有 +1 / -1 两种取值；传 2 会被 SDK 当非法参数直接拒绝
+        op_step_frame(m_ctx.player,-1);
     }
     if(!m_stepFrame){
         m_stepFrame = true;
@@ -591,9 +604,7 @@ void Player::exitStepFrame()
     m_stepFrame = false;
     ui->ctrlbar->stepFrameTime(false);
     ui->topMenu->stepFrameTime(false);
-    //让dt退出逐帧：恢复音频、把播放位置对齐到当前显示的帧
-    //dt.endFrameStep();
-    m_playerCore->postMessage(PlayerCmd::CMD_STEP_STOP);
+    op_exit_frame_step(m_ctx.player);
 }
 
 void Player::adjustVolume(double delta)
@@ -611,7 +622,7 @@ void Player::adjustVolume(double delta)
 void Player::changeSpeed(double delta)
 {
     //流媒体不支持倍速（DemuxThread::setSpeed 里还有一道闸门兜底）
-    if(m_playerCtx->getIsStreamMedia()) return;
+    if(op_is_stream(m_ctx.player)) return;
     double newSpeed = m_speed + delta;
     if (newSpeed < 0.5) newSpeed = 0.5;
     if (newSpeed > 2.0)  newSpeed = 2.0;
@@ -622,17 +633,17 @@ void Player::changeSpeed(double delta)
      * 累加几十次之后可能得到 1.6999999999999997 这种值，截断就变成 16（1.6x），
      * 于是“按了一下居然没变/跳了一档”。
      */
-    m_playerCore->postMessage(PlayerCmd::CMD_SET_SPEED, qRound(m_speed * 10.0));
-    ui->ctrlbar->setSpeedLabel(m_playerCtx->getSpeed());
+    op_set_speed(m_ctx.player,qRound(m_speed * 10.0));
+    ui->ctrlbar->setSpeedLabel(op_get_speedX10(m_ctx.player));
 }
 
 void Player::onEVT_PREPARED(const op_event *ev)
 {
-    long long durationMs = ev->duration_ms;
-    int width = ev->width;
-    int height = ev->height;
-    bool isStream = ev->is_stream == 1 ? true : false;
-    bool hasVideo = ev->has_video == 1 ? true : false;
+    long long durationMs = op_duration_ms(m_ctx.player);
+    int width = op_get_width(m_ctx.player);
+    int height = op_get_height(m_ctx.player);
+    bool isStream = op_is_stream(m_ctx.player);
+    bool hasVideo = op_has_video(m_ctx.player);
     QMetaObject::invokeMethod(this,[this,width,height,durationMs,isStream,hasVideo](){
         this->m_videoSrcW = width;
         this->m_videoSrcH = height;          // 注意别写成 m_videoSrcW（height 为 0 时 Init 会把控件置成 0 高，setPaint 会丢掉所有帧）
@@ -691,8 +702,21 @@ void Player::onEVT_PREPARED(const op_event *ev)
 
 void Player::onEVT_POSITION(const op_event *ev)
 {
-    int ms = ev->position_ms;
-    double speed = 1.0*ev->speedX10 / 10.0;
+    // 用事件里带的位置（这一刻的值）；不要改成 op_position_ms() —— 回调排队到
+    // GUI 线程后，查询接口可能已经被下一条 POSITION 覆盖了。
+    int ms = (int)ev->position_ms;
+    double speed = 1.0*op_get_speedX10(m_ctx.player) / 10.0;
+
+    /*
+     * 把"设备里还有多少毫秒没播"报回 SDK —— 这是 T4 的 B 方案：
+     * SDK 只知道自己环形缓冲里压了多少，设备那份只有壳知道。漏报的话音频时钟会超前，
+     * 视频判定"自己落后"然后疯狂丢帧。
+     * 每 150ms 报一次足够（sink 侧是"锚点 + 线性外推"，不需要报得很密）。
+     */
+    if (m_auPlayer) {
+        op_audio_set_device_pending_ms(m_ctx.player, (int32_t)m_auPlayer->getNoPlayMs());
+    }
+
     if (seekDebugOn()) qDebug() << "[seek] position" << ms;
     QMetaObject::invokeMethod(this,[this,ms,speed](){
         m_pts = ms;
@@ -763,6 +787,8 @@ void Player::onEVT_ERROR(const op_event *ev)
 
 void Player::onSEEkDONE(const op_event *ev)
 {
+    // 落点必须用事件里的 position_ms：回调排队到 GUI 线程后 op_position_ms()
+    // 可能已经是"播放中的下一个位置"了（之前这里误用了 op_duration_ms）。
     int64_t ms = ev->position_ms;
     if (seekDebugOn()) qDebug() << "[seek] done" << ms << "pending" << m_pendingSeekMs;
     QMetaObject::invokeMethod(this,[this,ms](){
@@ -821,16 +847,32 @@ void Player::postBlackFrame()
     const int w = m_videoSrcW > 0 ? m_videoSrcW : 1280;
     const int h = m_videoSrcH > 0 ? m_videoSrcH : 720;
 
-    AVFrame* black = av_frame_alloc();
+    // YUV420P 紧凑无填充总大小
+    int32_t y_size  = w * h;
+    int32_t uv_size = (w/2) * (h/2);
+    int32_t total_size = y_size + uv_size * 2;
+
+    op_frame* black = op_frame_alloc(total_size);
     if (!black) return;
-    black->format = AV_PIX_FMT_YUV420P;
+
+    black->format = OP_PIX_FMT_YUV420P;
     black->width  = w;
     black->height = h;
-    if (av_frame_get_buffer(black, 32) < 0) { av_frame_free(&black); return; }
 
-    memset(black->data[0], 16,  black->linesize[0] * h);
-    memset(black->data[1], 128, black->linesize[1] * (h / 2));
-    memset(black->data[2], 128, black->linesize[2] * (h / 2));
+    black->size   = total_size;
+    black->linesize[0] = w;
+    black->linesize[1] = w / 2;
+    black->linesize[2] = w / 2;
+    black->linesize[3] = 0;
+
+    uint8_t *Y = black->data;
+    uint8_t *U = Y + y_size;
+    uint8_t *V = U + uv_size;
+
+    // 黑色：Y=16，U=128，V=128
+    memset(Y, 16,  y_size);
+    memset(U, 128, uv_size);
+    memset(V, 128, uv_size);
 
     ui->video->beginPaint();        // 走既有的"最多一帧排队"名额
     ui->video->setPaint(black);     // 所有权交给 widget
@@ -838,53 +880,9 @@ void Player::postBlackFrame()
 }
 
 
-void Player::setVideoPainterCb()
-{
-    /*
-     * 这个回调由 core 的渲染线程调用，而 setPaint() 必须在 GUI 线程执行，
-     * 所以走 QueuedConnection 投递。投递是异步的 —— 等 lambda 真正执行时，
-     * 渲染线程早已把 frame 还回帧队列复用/释放了，直接捕获裸指针就是 use-after-free。
-     *
-     * 因此先 av_frame_clone() 克隆一份自己持有，连同 lambda 一起投递过去；
-     * VideoWidget::setPaint() 会接管所有权（换指针或丢弃时 av_frame_free）。
-     *
-     * 背压（beginPaint/endPaint）：QueuedConnection 本身是无界的 —— GUI 线程这一帧
-     * 还没画完，渲染线程继续投，事件队列就会越堆越多（每个 lambda 揣一整帧，
-     * 1080p 约 3MB，几秒钟就能把内存堆上去，同时画面延迟越来越大）。
-     * 所以"抢名额"必须在**投递之前**（也就是渲染线程这边）做：抢不到就丢掉这一帧，
-     * 保证任意时刻最多只有一帧在 GUI 线程排队；名额在 setPaint() 返回后归还。
-     */
-    m_videoCb = [this](AVFrame* frame) {
-        if (!frame) return;
-
-        //抢名额失败 = GUI 线程还没消化上一帧 → 这一帧直接丢（丢帧优于无界堆积）
-        if (!m_widget->beginPaint()) {
-            av_frame_free(&frame);
-            return;
-        }
-
-        const bool posted = QMetaObject::invokeMethod(m_widget, [this, frame]() {
-            m_widget->setPaint(frame);   //接管并释放 frame（尺寸不匹配时也会释放）
-            m_widget->endPaint();        //归还名额：无论 setPaint 走哪条分支都要还
-        }, Qt::QueuedConnection);
-
-        //投递失败（控件已销毁 / 没有事件循环）：自己收拾，否则名额会永久占死
-        if (!posted) {
-            av_frame_free(&frame);
-            m_widget->endPaint();
-        }
-    };
-
-}
-
-
-
-
-
-
 void Player::sliderSeek(double pos)
 {
-    if(!m_isInit || m_playerCtx->getIsFrameStep()) return;
+    if(!m_isInit || m_stepFrame) return;
     //用户主动拖动：丢弃还没生效的累积目标，免得它晚一步把进度拽回去
     if(m_seekDebounceTimerId){
         killTimer(m_seekDebounceTimerId);
@@ -958,7 +956,7 @@ void Player::closeEvent(QCloseEvent *e)
     ui->ctrlbar->setDisabled(true);
     ui->topMenu->setDisabled(true);
     // 先停播放、停线程（GUI 线程执行，安全）
-    m_playerCore->postMessage(PlayerCmd::CMD_STOP);
+    op_stop(m_ctx.player);
     // 接受关闭
     e->accept();
 }
@@ -1168,15 +1166,11 @@ void Player::updateResize(const QPoint &globalPos)
 void Player::addToPlayList(const QString &path)
 {
     ui->playList->addFile(path);
-    //dt.setHasPlayList(true);
-    m_playerCore->postMessage(ContextChange::CTX_HAS_PLAYLIST,1);
 }
 
 void Player::play()
 {
     if(!m_isInit) return;
-    if (seekDebugOn()) qDebug() << "[pause] play() called, ui.isPause =" << m_isPause
-                                << " ctx.isPause =" << m_playerCtx->getIsPause();
     //如果在逐帧，先退出逐帧（位置会对齐）
     exitStepFrame();
     ui->ctrlbar->stepFrameTime(false);
@@ -1184,37 +1178,36 @@ void Player::play()
     ui->topMenu->stepFrameTime(false);
     m_stepFrame = false;
     m_isPause = false;
-    //dt.setPause(false);
-    m_playerCore->postMessage(PlayerCmd::CMD_PAUSE,0);
+    op_play(m_ctx.player);
+    if (m_auPlayer) m_auPlayer->setPause(false);
 }
 
 void Player::pause()
 {
     if(!m_isInit) return;
-    if (seekDebugOn()) qDebug() << "[pause] pause() called, ui.isPause =" << m_isPause
-                                << " ctx.isPause =" << m_playerCtx->getIsPause();
     //如果在逐帧，先退出逐帧（位置会对齐）
     exitStepFrame();
     ui->ctrlbar->setPausePictrue(true);
     m_isPause = true;
-    //dt.setPause(true);
-    m_playerCore->postMessage(PlayerCmd::CMD_PAUSE,1);
+    op_pause(m_ctx.player);
+    if (m_auPlayer) m_auPlayer->setPause(true);
 }
 
-void on_event(void *user, const op_event *ev)
+void Player::on_event(void *user, const op_event *ev)
 {
-    PlayerContext* ctx = static_cast<PlayerContext*>(user);
+    PlayerCtx* ctx = static_cast<PlayerCtx*>(user);
+    Player* self = ctx ? ctx->self : nullptr;
+    if (!self || !ev) return;
 
     switch (ev->type) {
     case OP_EVENT_OPENED:
-        ctx->duration = ev->duration_ms;
-        onEVT_PREPARED(ev);
+        self->onEVT_PREPARED(ev);
         // 如果想打开后停在第一帧，可以在这里调 op_pause(ctx->player);
         break;
 
     case OP_EVENT_POSITION:
         // 这里大概每 150ms 会来一次，适合更新 UI 进度条
-        onEVT_POSITION(ev);
+        self->onEVT_POSITION(ev);
         break;
 
     case OP_EVENT_STATE:
@@ -1222,15 +1215,16 @@ void on_event(void *user, const op_event *ev)
         break;
 
     case OP_EVENT_SEEK_DONE:
-        onSEEkDONE(ev);
+        self->onSEEkDONE(ev);
         break;
 
     case OP_EVENT_COMPLETED:
-
+        // 播完了：有下一集就切下一集（core 不再管播放列表，由壳决定）
+        self->playNext();
         break;
 
     case OP_EVENT_ERROR:
-        onEVT_ERROR(ev);
+        self->onEVT_ERROR(ev);
         ctx->running = false;
         break;
 
@@ -1239,42 +1233,41 @@ void on_event(void *user, const op_event *ev)
     }
 }
 
-void on_video(void *user, const op_frame *frame)
+void Player::on_video(void *user,const op_frame *frame)
 {
-    // ⚠️ 铁律：frame->data 只在回调期间有效，不能存指针，不能阻塞！
-    // 这里是同步处理，实际接入 OpenGL 时，你应该在这里直接 glTexSubImage2D
+    PlayerCtx* ctx = static_cast<PlayerCtx*>(user);
+    Player* self = ctx ? ctx->self : nullptr;
+    if (!self || !frame) return;
 
-}
+    // 回调返回后 frame 就失效，而 GUI 线程要排队才画 → 先深拷贝一份
+    op_frame* opFrame = op_frame_clone(frame);
+    if (!opFrame) return;
 
-void on_log(void *user, int level, const char *line)
-{
-    const char* levels[] = {"DEBUG", "INFO", "WARN", "ERROR"};
-    qDebug()<< "[SDK " << levels[level] << "] " << line ;
-}
-
-void audio_thread_func(PlayerContext *ctx)
-{
-    const int BUFFER_SIZE = 4096;
-    uint8_t buffer[BUFFER_SIZE];
-
-    while (ctx->running) {
-        // 拉取音频数据
-        int32_t bytesRead = op_audio_read(ctx->player, buffer, BUFFER_SIZE);
-
-        if (bytesRead > 0) {
-            // 成功读到 PCM 数据 (S16交错)
-            // 实际场景：这里把 buffer 写给你的声卡设备 (如 QAudioSink::write, AAudio 等)
-            // 假设设备写得很快，我们上报设备积压为 0ms (真实场景要算设备的 bufferSize - bytesFree)
-            op_audio_set_device_pending_ms(ctx->player, 0);
-
-            // std::cout << "[音频] 写入声卡 " << bytesRead << " 字节" << std::endl;
-        } else if (bytesRead == 0) {
-            // 暂时没数据，稍微睡一下（千万别死等，也别忙转）
-            std::this_thread::sleep_for(std::chrono::milliseconds(3));
-        } else {
-            // < 0 表示发生了错误
-            qDebug() << "[音频] 拉流失败，错误码: " << bytesRead ;
-            break;
-        }
+    //抢名额失败 = GUI 线程还没消化上一帧 → 这一帧直接丢（丢帧优于无界堆积）
+    if (!self->m_widget->beginPaint()) {
+        op_frame_free(&opFrame);
+        return;
     }
+
+    const bool posted = QMetaObject::invokeMethod(self->m_widget, [self, opFrame]() {
+        self->m_widget->setPaint(opFrame);   //接管并释放 frame（尺寸不匹配时也会释放）
+        self->m_widget->endPaint();          //归还名额：无论 setPaint 走哪条分支都要还
+    }, Qt::QueuedConnection);
+
+    //投递失败（控件已销毁 / 没有事件循环）：自己收拾，否则名额会永久占死
+    if (!posted) {
+        op_frame_free(&opFrame);
+        self->m_widget->endPaint();
+    }
+
 }
+
+void Player::on_log(void *user, int level, const char *line)
+{
+    (void)user;
+    const char* levels[] = {"DEBUG", "INFO", "WARN", "ERROR"};
+    const char* lv = (level >= 0 && level <= 3) ? levels[level] : "DEBUG";
+    qDebug()<< "[SDK " << lv << "] " << line ;
+}
+
+
