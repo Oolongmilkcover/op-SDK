@@ -144,8 +144,6 @@ void PlayerCore::setMessageHandler()
                 //关闭按钮
             case EVT_ABLEBTN:
                 //开启按钮
-            case EVT_PLAYNEXT:
-                //当前视频播放完毕请求播放下一个
             case EVT_SEEK_DONE:
                 // arg1=实际落点ms（seek 可能不精确，要对齐关键帧）
             case EVT_BUFFERING:
@@ -195,10 +193,6 @@ void PlayerCore::setMessageHandler()
             case CTX_SEEKMS:
                 //arg1 = ms
                 m_playerctx->setSeekMs(msg.arg1);
-                break;
-            case CTX_HAS_PLAYLIST:
-                //arg1 = 1/0
-                m_playerctx->setHasPlayList(msg.arg1==1?true:false);
                 break;
             case CTX_IS_FRAME_STEP:
                 //arg1 = 1/0

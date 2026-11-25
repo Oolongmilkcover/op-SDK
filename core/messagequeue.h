@@ -39,7 +39,6 @@ enum PlayerEvent {
     EVT_CLEARSCREEN,                   // 清屏
     EVT_DISABLEBTN,                    //关闭按钮
     EVT_ABLEBTN,                       //开启按钮
-    EVT_PLAYNEXT,                      //当前视频播放完毕请求播放下一个
     EVT_SEEK_DONE,                     // arg1=实际落点ms（seek 可能不精确，要对齐关键帧）
     EVT_BUFFERING,                     // arg1=1 开始缓冲 / 0 结束（网络流才有意义）
     EVT_COMPLETED,                     // 播到文件尾
@@ -47,6 +46,10 @@ enum PlayerEvent {
 };
 
 //DemuxThread -> PlayerCore
+/*
+ * 播放列表相关的 CTX_HAS_PLAYLIST 已删除（2026-11-25）：core 不再关心"有没有下一集"。
+ * 播完只发 EVT_COMPLETED，由壳决定重播还是 op_open 下一个文件。
+ */
 enum ContextChange{
     CTX_IS_EXIT       = 200,            //arg1 = true/false   1/0
     CTX_IS_PAUSE,                       //arg1 = 1/0
@@ -54,7 +57,6 @@ enum ContextChange{
     CTX_HAS_AUDIO,                      //arg1 = 1/0
     CTX_IS_SEEKING,                     //arg1 = 1/0
     CTX_SEEKMS,                         //arg1 = ms
-    CTX_HAS_PLAYLIST,                   //arg1 = 1/0
     CTX_IS_FRAME_STEP,                  //arg1 = 1/0
     CTX_IS_STREAM_MEDIA,                //arg1 = 1/0
     CTX_IS_AUDIO_MEDIA,                 //arg1 = 1/0

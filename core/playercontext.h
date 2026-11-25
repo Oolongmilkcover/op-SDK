@@ -15,7 +15,6 @@ private:
     void setHasAudio(bool val)                 { m_hasAudio.store(val);}
     void setIsSeeking(bool val)                { m_isSeeking.store(val);}
     void setSeekMs(long long val)              { m_seekMs.store(val);}
-    void setHasPlayList(bool val)              { m_hasPlayList.store(val);}
     void setIsFrameStep(bool val)              { m_isFrameStep.store(val);}
     void setIsStreamMedia(bool val)            { m_isStreamMedia.store(val);}
     void setIsAudioMedia(bool val)             { m_isAudioMedia.store(val);}
@@ -36,7 +35,6 @@ public:
     bool getHasAudio()        const   {return m_hasAudio.load();}
     bool getIsSeeking()       const   {return m_isSeeking.load();}
     long long  getSeekMs()    const   {return m_seekMs.load();}
-    bool getHasPlayList()     const   {return m_hasPlayList.load();}
     bool getIsFrameStep()     const   {return m_isFrameStep.load();}
     bool getIsStreamMedia()   const   {return m_isStreamMedia.load();}
     bool getIsAudioMedia()    const   {return m_isAudioMedia.load();}
@@ -63,8 +61,6 @@ private:
     std::atomic<bool> m_isSeeking{false};
     //seek目标（毫秒）
     std::atomic<long long> m_seekMs{0};
-    //主程序是否有播放列表
-    std::atomic<bool> m_hasPlayList{false};
 
     //是否在逐帧
     std::atomic<bool> m_isFrameStep{false};
