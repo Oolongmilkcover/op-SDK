@@ -129,6 +129,9 @@ int main()
     CHECK(cap.waitFor(OP_EVENT_OPENED, 5000));
     CHECK(op_duration_ms(p) >= 2000);
     const bool hasVideo = (op_has_video(p) == 1);
+    // 纯音频容器（mp3/flac/aac...）由容器名判定；mp4 里再放纯音频不会置位，
+    // 这两种语义不一样，别拿它当 op_is_music 用
+    CHECK(op_is_audio_media(p) == (hasVideo ? 0 : 1));
     std::printf("   有视频轨 = %d，时长 = %lld ms\n", hasVideo ? 1 : 0,
                 (long long)op_duration_ms(p));
 

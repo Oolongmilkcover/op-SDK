@@ -226,6 +226,7 @@ int32_t op_has_video(p);     // OPENED 之后才有效
 int32_t op_has_audio(p);
 int32_t op_is_music(p);      // 有音轨且没有视频轨
 int32_t op_is_stream(p);
+int32_t op_is_audio_media(p); // 容器本身是纯音频（mp3/flac/aac…）；mp4 内只有音轨时为 0
 int32_t op_get_width(p);
 int32_t op_get_height(p);
 int32_t op_get_speedX10(p);  // 倍速 ×10

@@ -375,9 +375,13 @@ OP_API int32_t   op_has_video (op_player *p);
 OP_API int32_t   op_has_audio (op_player *p);
 OP_API int32_t   op_is_music  (op_player *p);
 OP_API int32_t   op_is_stream (op_player *p);
+/* 1 = 容器本身是纯音频（mp3/flac/aac…，核心对它关闭逐帧/精确 seek）；
+ * 注意和 op_is_music 语义不同：mp4 里只放一条音轨时 op_is_music=1，这里仍是 0。*/
+OP_API int32_t   op_is_audio_media(op_player *p);
 OP_API int32_t   op_get_width (op_player *p);
 OP_API int32_t   op_get_height(op_player *p);
 OP_API int32_t   op_get_speedX10(op_player *p);
+
 
 #ifdef __cplusplus
 } /* extern "C" */

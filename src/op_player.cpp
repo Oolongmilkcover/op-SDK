@@ -840,3 +840,10 @@ OP_API op_frame *op_frame_alloc(int32_t dataSize)
     }
     return dst;
 }
+
+int32_t op_is_audio_media(op_player *p)
+{
+    // 和其它查询接口保持一致：空指针返回 0，不崩
+    if (!p) return 0;
+    return p->ctx.getIsAudioMedia() ? 1 : 0;
+}
