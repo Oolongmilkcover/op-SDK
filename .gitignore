@@ -5,6 +5,10 @@ cmake-build-*/
 out/
 dist/
 dist-*/
+# 发行包归档（四个平台的 zip/tar.gz，单个 100MB 上下）：
+# 只作为 GitHub Release 的附件，不进版本库。
+releaseZip/
+releaseZip-*/
 *.obj
 *.o
 *.pdb
